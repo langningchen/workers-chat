@@ -1,356 +1,233 @@
 // This is the Edge Chat Demo Worker, built using Durable Objects!
 
-// ===============================
-// Introduction to Modules
-// ===============================
-//
-// The first thing you might notice, if you are familiar with the Workers platform, is that this
-// Worker is written differently from others you may have seen. It even has a different file
-// extension. The `mjs` extension means this JavaScript is an ES Module, which, among other things,
-// means it has imports and exports. Unlike other Workers, this code doesn't use
-// `addEventListener("fetch", handler)` to register its main HTTP handler; instead, it _exports_
-// a handler, as we'll see below.
-//
-// This is a new way of writing Workers that we expect to introduce more broadly in the future. We
-// like this syntax because it is *composable*: You can take two workers written this way and
-// merge them into one worker, by importing the two Workers' exported handlers yourself, and then
-// exporting a new handler that call into the other Workers as appropriate.
-//
-// This new syntax is required when using Durable Objects, because your Durable Objects are
-// implemented by classes, and those classes need to be exported. The new syntax can be used for
-// writing regular Workers (without Durable Objects) too, but for now, you must be in the Durable
-// Objects beta to be able to use the new syntax, while we work out the quirks.
-//
-// To see an example configuration for uploading module-based Workers, check out the wrangler.toml
-// file or one of our Durable Object templates for Wrangler:
-//   * https://github.com/cloudflare/durable-objects-template
-//   * https://github.com/cloudflare/durable-objects-rollup-esm
-//   * https://github.com/cloudflare/durable-objects-webpack-commonjs
-
-// ===============================
-// Required Environment
-// ===============================
-//
-// This worker, when deployed, must be configured with one environment binding:
-// * rooms: A Durable Object namespace binding mapped to the ChatRoom class.
-//
-// Incidentally, in pre-modules Workers syntax, "bindings" (like KV bindings, secrets, etc.)
-// appeared in your script as global variables, but in the new modules syntax, this is no longer
-// the case. Instead, bindings are now delivered in an "environment object" when an event handler
-// (or Durable Object class constructor) is called. Look for the variable `env` below.
-//
-// We made this change, again, for composability: The global scope is global, but if you want to
-// call into existing code that has different environment requirements, then you need to be able
-// to pass the environment as a parameter instead.
-//
-// Once again, see the wrangler.toml file to understand how the environment is configured.
-
-// =======================================================================================
-// The regular Worker part...
-//
-// This section of the code implements a normal Worker that receives HTTP requests from external
-// clients. This part is stateless.
-
-// With the introduction of modules, we're experimenting with allowing text/data blobs to be
-// uploaded and exposed as synthetic modules. In wrangler.toml we specify a rule that files ending
-// in .html should be uploaded as "Data", equivalent to content-type `application/octet-stream`.
-// So when we import it as `HTML` here, we get the HTML content as an `ArrayBuffer`. This lets us
-// serve our app's static asset without relying on any separate storage. (However, the space
-// available for assets served this way is very limited; larger sites should continue to use Workers
-// KV to serve assets.)
 import HTML from "./chat.html";
 
-// `handleErrors()` is a little utility function that can wrap an HTTP request handler in a
-// try/catch and return errors to the client. You probably wouldn't want to use this in production
-// code but it is convenient when debugging and iterating.
 async function handleErrors(request, func) {
   try {
     return await func();
   } catch (err) {
     if (request.headers.get("Upgrade") == "websocket") {
-      // Annoyingly, if we return an HTTP error in response to a WebSocket request, Chrome devtools
-      // won't show us the response body! So... let's send a WebSocket response with an error
-      // frame instead.
       let pair = new WebSocketPair();
       pair[1].accept();
-      pair[1].send(JSON.stringify({error: err.stack}));
+      pair[1].send(JSON.stringify({ error: err.stack }));
       pair[1].close(1011, "Uncaught exception during session setup");
       return new Response(null, { status: 101, webSocket: pair[0] });
     } else {
-      return new Response(err.stack, {status: 500});
+      return new Response(err.stack, { status: 500 });
     }
   }
 }
 
-// In modules-syntax workers, we use `export default` to export our script's main event handlers.
-// Here, we export one handler, `fetch`, for receiving HTTP requests. In pre-modules workers, the
-// fetch handler was registered using `addEventHandler("fetch", event => { ... })`; this is just
-// new syntax for essentially the same thing.
-//
-// `fetch` isn't the only handler. If your worker runs on a Cron schedule, it will receive calls
-// to a handler named `scheduled`, which should be exported here in a similar way. We will be
-// adding other handlers for other types of events over time.
 export default {
   async fetch(request, env) {
     return await handleErrors(request, async () => {
-      // We have received an HTTP request! Parse the URL and route the request.
-
       let url = new URL(request.url);
       let path = url.pathname.slice(1).split('/');
 
       if (!path[0]) {
-        // Serve our HTML at the root path.
-        return new Response(HTML, {headers: {"Content-Type": "text/html;charset=UTF-8"}});
+        return new Response(HTML, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
       }
 
       switch (path[0]) {
         case "api":
-          // This is a request for `/api/...`, call the API handler.
           return handleApiRequest(path.slice(1), request, env);
 
         case "upload": {
-          if (request.method !== 'POST') return new Response('Method not allowed', {status: 405});
+          if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
           const Image = await request.text();
           let array = new Uint8Array(32);
           crypto.getRandomValues(array);
           let ImageID = Array.from(array, byte => ('0' + byte.toString(16)).slice(-2)).join('').substring(0, 32);
           const ImageData = Image.replace(/^data:image\/\w+;base64,/, '');
-          if (!ImageData || ImageData.length === 0) return new Response('Invalid image', {status: 400});
+          if (!ImageData || ImageData.length === 0) return new Response('Invalid image', { status: 400 });
           try {
-              const response = await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg'), {
-                  method: 'PUT',
-                  headers: {
-                      'Authorization': 'Bearer ' + env.GithubPAT,
-                      'Content-Type': 'application/json',
-                      'User-Agent': 'langningchen-image',
-                  },
-                  body: JSON.stringify({
-                      message: `Upload from ${request.headers.get('CF-Connecting-IP')}`,
-                      content: ImageData
-                  })
-              });
-              if (!response.ok) return new Response('Upload failed', {status: 500});
-              return new Response(ImageID, { headers: { 'Content-Type': 'text/plain' }});
+            const response = await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg'), {
+              method: 'PUT',
+              headers: {
+                'Authorization': 'Bearer ' + env.GithubPAT,
+                'Content-Type': 'application/json',
+                'User-Agent': 'langningchen-image',
+              },
+              body: JSON.stringify({
+                message: `Upload from ${request.headers.get('CF-Connecting-IP')}`,
+                content: ImageData
+              })
+            });
+            if (!response.ok) return new Response('Upload failed', { status: 500 });
+            return new Response(ImageID, { headers: { 'Content-Type': 'text/plain' } });
           } catch (e) {
-              return new Response('Upload failed', {status: 500});
+            return new Response('Upload failed', { status: 500 });
           }
         }
 
         default:
           if (request.method === 'GET' && path[0].length === 32) {
-              const ImageID = path[0];
-              const clientETag = request.headers.get('If-None-Match');
-              const imageETag = `"${ImageID}"`;
-              if (clientETag === imageETag) return new Response(null, { status: 304 });
-              return await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg?1=1'), {
-                  method: 'GET',
-                  headers: {
-                      'Authorization': 'Bearer ' + env.GithubPAT,
-                      'Accept': 'application/vnd.github.v3.raw',
-                      'User-Agent': 'langningchen-image',
-                  },
-              }).then(async (res) => {
-                  if (!res.ok) return new Response('Image not found', { status: 404 });
-                  return new Response(await res.blob(), { 
-                      headers: { 
-                          'Content-Type': 'image/jpeg',
-                          'Cache-Control': 'public, max-age=31536000, immutable',
-                          'ETag': imageETag
-                      }, 
-                  });
+            const ImageID = path[0];
+            const clientETag = request.headers.get('If-None-Match');
+            const imageETag = `"${ImageID}"`;
+            if (clientETag === imageETag) return new Response(null, { status: 304 });
+            return await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg?1=1'), {
+              method: 'GET',
+              headers: {
+                'Authorization': 'Bearer ' + env.GithubPAT,
+                'Accept': 'application/vnd.github.v3.raw',
+                'User-Agent': 'langningchen-image',
+              },
+            }).then(async (res) => {
+              if (!res.ok) return new Response('Image not found', { status: 404 });
+              return new Response(await res.blob(), {
+                headers: {
+                  'Content-Type': 'image/jpeg',
+                  'Cache-Control': 'public, max-age=31536000, immutable',
+                  'ETag': imageETag
+                },
               });
+            });
           }
-          return new Response("Not found", {status: 404});
+          return new Response("Not found", { status: 404 });
       }
     });
   }
-}
-
+};
 
 async function handleApiRequest(path, request, env) {
-  // We've received at API request. Route the request based on the path.
-
   switch (path[0]) {
     case "room": {
-      // Request for `/api/room/...`.
-
       if (!path[1]) {
-        // The request is for just "/api/room", with no ID.
         if (request.method == "POST") {
-          // POST to /api/room creates a private room.
-          //
-          // Incidentally, this code doesn't actually store anything. It just generates a valid
-          // unique ID for this namespace. Each durable object namespace has its own ID space, but
-          // IDs from one namespace are not valid for any other.
-          //
-          // The IDs returned by `newUniqueId()` are unguessable, so are a valid way to implement
-          // "anyone with the link can access" sharing. Additionally, IDs generated this way have
-          // a performance benefit over IDs generated from names: When a unique ID is generated,
-          // the system knows it is unique without having to communicate with the rest of the
-          // world -- i.e., there is no way that someone in the UK and someone in New Zealand
-          // could coincidentally create the same ID at the same time, because unique IDs are,
-          // well, unique!
           let id = env.rooms.newUniqueId();
-          return new Response(id.toString(), {headers: {"Access-Control-Allow-Origin": "*"}});
+          return new Response(id.toString(), { headers: { "Access-Control-Allow-Origin": "*" } });
         } else {
-          // If we wanted to support returning a list of public rooms, this might be a place to do
-          // it. The list of room names might be a good thing to store in KV, though a singleton
-          // Durable Object is also a possibility as long as the Cache API is used to cache reads.
-          // (A caching layer would be needed because a single Durable Object is single-threaded,
-          // so the amount of traffic it can handle is limited. Also, caching would improve latency
-          // for users who don't happen to be located close to the singleton.)
-          //
-          // For this demo, though, we're not implementing a public room list, mainly because
-          // inevitably some trolls would probably register a bunch of offensive room names. Sigh.
-          return new Response("Method not allowed", {status: 405});
+          return new Response("Method not allowed", { status: 405 });
         }
       }
 
-      // OK, the request is for `/api/room/<name>/...`. It's time to route to the Durable Object
-      // for the specific room.
       let name = path[1];
-
-      // Each Durable Object has a 256-bit unique ID. IDs can be derived from string names, or
-      // chosen randomly by the system.
       let id;
       if (name.match(/^[0-9a-f]{64}$/)) {
-        // The name is 64 hex digits, so let's assume it actually just encodes an ID. We use this
-        // for private rooms. `idFromString()` simply parses the text as a hex encoding of the raw
-        // ID (and verifies that this is a valid ID for this namespace).
         id = env.rooms.idFromString(name);
       } else if (name.length <= 32) {
-        // Treat as a string room name (limited to 32 characters). `idFromName()` consistently
-        // derives an ID from a string.
         id = env.rooms.idFromName(name);
       } else {
-        return new Response("Name too long", {status: 404});
+        return new Response("Name too long", { status: 404 });
       }
 
-      // Get the Durable Object stub for this room! The stub is a client object that can be used
-      // to send messages to the remote Durable Object instance. The stub is returned immediately;
-      // there is no need to await it. This is important because you would not want to wait for
-      // a network round trip before you could start sending requests. Since Durable Objects are
-      // created on-demand when the ID is first used, there's nothing to wait for anyway; we know
-      // an object will be available somewhere to receive our requests.
       let roomObject = env.rooms.get(id);
 
-      // Compute a new URL with `/api/room/<name>` removed. We'll forward the rest of the path
-      // to the Durable Object.
       let newUrl = new URL(request.url);
       newUrl.pathname = "/" + path.slice(2).join("/");
 
-      // Send the request to the object. The `fetch()` method of a Durable Object stub has the
-      // same signature as the global `fetch()` function, but the request is always sent to the
-      // object, regardless of the request's URL.
       return roomObject.fetch(newUrl, request);
     }
 
     default:
-      return new Response("Not found", {status: 404});
+      return new Response("Not found", { status: 404 });
   }
 }
 
-// =======================================================================================
-// The ChatRoom Durable Object Class
-
-// ChatRoom implements a Durable Object that coordinates an individual chat room. Participants
-// connect to the room using WebSockets, and the room broadcasts messages from each participant
-// to all others.
 export class ChatRoom {
   constructor(state, env) {
-    this.state = state
-
-    // `state.storage` provides access to our durable storage. It provides a simple KV
-    // get()/put() interface.
+    this.state = state;
     this.storage = state.storage;
-
-    // `env` is our environment bindings (discussed earlier).
     this.env = env;
 
-    // We will track metadata for each client WebSocket object in `sessions`.
     this.sessions = new Map();
     this.roomPassword = null;
+    this.messages = [];
+    this.messageCounter = 0;
+
     this.state.blockConcurrencyWhile(async () => {
-        let storedPassword = await this.storage.get("roomPassword");
-        if (storedPassword !== undefined) {
-            this.roomPassword = storedPassword;
+      let storedPassword = await this.storage.get("roomPassword");
+      if (storedPassword !== undefined) {
+        this.roomPassword = storedPassword;
+      }
+
+      // Load messages history
+      let history = await this.storage.list({ prefix: "msg_", limit: 1000, reverse: true });
+      let msgs = [];
+      for (let [key, value] of history) {
+        msgs.push(value);
+        let idNum = parseInt(key.split("_")[1]);
+        if (idNum > this.messageCounter) {
+          this.messageCounter = idNum;
         }
+      }
+      // sort by timestamp ascending
+      msgs.sort((a, b) => a.timestamp - b.timestamp);
+      this.messages = msgs;
     });
 
     this.state.getWebSockets().forEach((webSocket) => {
-      // The constructor may have been called when waking up from hibernation,
-      // so get previously serialized metadata for any existing WebSockets.
       let meta = webSocket.deserializeAttachment();
-
       let blockedMessages = [];
-      this.sessions.set(webSocket, { ...meta, blockedMessages });
+      let lastActive = Date.now();
+      this.sessions.set(webSocket, { ...meta, blockedMessages, lastActive });
+      webSocket.serializeAttachment({ ...meta, lastActive });
     });
 
     this.lastTimestamp = 0;
+    this.pingInterval = null;
+    if (this.sessions.size > 0) {
+      this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
+    }
   }
 
-  // The system will call fetch() whenever an HTTP request is sent to this Object. Such requests
-  // can only be sent from other Worker code, such as the code above; these requests don't come
-  // directly from the internet. In the future, we will support other formats than HTTP for these
-  // communications, but we started with HTTP for its familiarity.
+  checkTimeout() {
+    if (this.sessions.size === 0) {
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+      return;
+    }
+    let now = Date.now();
+    this.sessions.forEach((session, ws) => {
+      // Kick offline if no message/ping received for 10s
+      if (now - session.lastActive > 10000) {
+        ws.close(1011, "Ping timeout");
+        this.closeOrErrorHandler(ws);
+      }
+    });
+  }
+
   async fetch(request) {
     return await handleErrors(request, async () => {
       let url = new URL(request.url);
 
       switch (url.pathname) {
         case "/websocket": {
-          // The request is to `/api/room/<name>/websocket`. A client is trying to establish a new
-          // WebSocket session.
           if (request.headers.get("Upgrade") != "websocket") {
-            return new Response("expected websocket", {status: 400});
+            return new Response("expected websocket", { status: 400 });
           }
 
-          // Get the client's IP address for use with the rate limiter.
           let ip = request.headers.get("CF-Connecting-IP");
-
-          // To accept the WebSocket request, we create a WebSocketPair (which is like a socketpair,
-          // i.e. two WebSockets that talk to each other), we return one end of the pair in the
-          // response, and we operate on the other end. Note that this API is not part of the
-          // Fetch API standard; unfortunately, the Fetch API / Service Workers specs do not define
-          // any way to act as a WebSocket server today.
           let pair = new WebSocketPair();
 
-          // We're going to take pair[1] as our end, and return pair[0] to the client.
           await this.handleSession(pair[1], ip);
 
-          // Now we return the other end of the pair to the client.
           return new Response(null, { status: 101, webSocket: pair[0] });
         }
 
         default:
-          return new Response("Not found", {status: 404});
+          return new Response("Not found", { status: 404 });
       }
     });
   }
 
-  // handleSession() implements our WebSocket-based chat protocol.
   async handleSession(webSocket, ip) {
-    if (this.sessions.size >= 2) {
-      webSocket.accept();
-      webSocket.send(JSON.stringify({error: "Room is full."}));
-      webSocket.close(1011, "Room is full");
-      return;
-    }
-
-    // Accept our end of the WebSocket. This tells the runtime that we'll be terminating the
-    // WebSocket in JavaScript, not sending it elsewhere.
     this.state.acceptWebSocket(webSocket);
 
-    // Create our session and add it to the sessions map.
-    let session = { blockedMessages: [] };
-    // attach limiterId to the webSocket so it survives hibernation
-    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment() });
+    let session = { blockedMessages: [], lastActive: Date.now() };
+    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
     this.sessions.set(webSocket, session);
 
-    // Queue "join" messages for all online users, to populate the client's roster.
+    if (!this.pingInterval) {
+      this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
+    }
+
     for (let otherSession of this.sessions.values()) {
       if (otherSession.name) {
-        session.blockedMessages.push(JSON.stringify({joined: otherSession.name}));
+        session.blockedMessages.push(JSON.stringify({ joined: otherSession.name }));
       }
     }
   }
@@ -363,141 +240,163 @@ export class ChatRoom {
         return;
       }
 
+      // Update last active time for timeout tracking
+      session.lastActive = Date.now();
+      webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
+
       if (msg === "ping") {
         webSocket.send("pong");
         return;
       }
 
-      // I guess we'll use JSON.
       let data = JSON.parse(msg);
 
       if (!session.name) {
-        if (!data.name || !data.password) {
-          webSocket.send(JSON.stringify({error: "Name and password required."}));
-          webSocket.close(1008, "Name and password required.");
+        if (!data.name) {
+          webSocket.send(JSON.stringify({ error: "Name required." }));
+          webSocket.close(1008, "Name required.");
           return;
         }
 
-        if (this.roomPassword === null) {
-          this.roomPassword = data.password;
-          this.storage.put("roomPassword", this.roomPassword);
-        } else if (this.roomPassword !== data.password) {
-          webSocket.send(JSON.stringify({error: "Incorrect password."}));
+        let providedPassword = data.password || "";
+
+        if (this.roomPassword !== null && this.roomPassword !== providedPassword) {
+          webSocket.send(JSON.stringify({ error: "Incorrect password." }));
           webSocket.close(1008, "Incorrect password.");
           return;
+        } else if (this.roomPassword === null && providedPassword !== "") {
+          this.roomPassword = providedPassword;
+          this.storage.put("roomPassword", this.roomPassword);
         }
 
-        // The first message the client sends is the user info message with their name. Save it
-        // into their session object.
-        session.name = "" + (data.name || "anonymous");
-        // attach name to the webSocket so it survives hibernation
+        session.name = "" + data.name;
         webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
 
-        // Don't let people use ridiculously long names. (This is also enforced on the client,
-        // so if they get here they are not using the intended client.)
         if (session.name.length > 32) {
-          webSocket.send(JSON.stringify({error: "Name too long."}));
+          webSocket.send(JSON.stringify({ error: "Name too long." }));
           webSocket.close(1009, "Name too long.");
           return;
         }
 
-        // Deliver all the messages we queued up since the user connected.
+        // Send history upon join
+        webSocket.send(JSON.stringify({ history: this.messages }));
+
         session.blockedMessages.forEach(queued => {
           webSocket.send(queued);
         });
         delete session.blockedMessages;
 
-        // Broadcast to all other connections that this user has joined.
-        this.broadcast({joined: session.name});
-
-        webSocket.send(JSON.stringify({ready: true}));
+        this.broadcast({ joined: session.name });
+        webSocket.send(JSON.stringify({ ready: true }));
         return;
       }
 
       // Handle name change
-      if (data.message.startsWith("/nick ")) {
+      if (data.message !== undefined && data.message.startsWith("/nick ")) {
         let newName = data.message.substring(6).trim();
         if (newName.length > 0 && newName.length <= 32) {
-            let oldName = session.name;
-            session.name = newName;
-            webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
-            this.broadcast({nameChange: {old: oldName, new: newName}});
+          let oldName = session.name;
+          session.name = newName;
+          webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
+          this.broadcast({ nameChange: { old: oldName, new: newName } });
         }
         return;
       }
 
-      // Construct sanitized message for storage and broadcast.
-      data = { name: session.name, message: "" + data.message };
+      // Handle Edit Message
+      if (data.edit) {
+        let msgId = data.edit;
+        let newText = data.text;
 
-      // Add timestamp. Here's where this.lastTimestamp comes in -- if we receive a bunch of
-      // messages at the same time (or if the clock somehow goes backwards????), we'll assign
-      // them sequential timestamps, so at least the ordering is maintained.
-      data.timestamp = Math.max(Date.now(), this.lastTimestamp + 1);
-      this.lastTimestamp = data.timestamp;
+        let targetMsg = this.messages.find(m => m.id === msgId);
+        // Make sure user is the one who originally sent it
+        if (targetMsg && targetMsg.name === session.name) {
+          targetMsg.message = "" + newText;
+          targetMsg.edited = true;
+          this.storage.put("msg_" + msgId.padStart(10, "0"), targetMsg);
+          this.broadcast({ edited: msgId, text: newText });
+        }
+        return;
+      }
 
-      // Broadcast the message to all other WebSockets.
-      let dataStr = JSON.stringify(data);
-      this.broadcast(dataStr);
+      // Handle Delete Message
+      if (data.delete) {
+        let msgId = data.delete;
 
-      // Do NOT save message (burn after reading).
+        let targetIndex = this.messages.findIndex(m => m.id === msgId);
+        if (targetIndex !== -1 && this.messages[targetIndex].name === session.name) {
+          this.messages.splice(targetIndex, 1);
+          this.storage.delete("msg_" + msgId.padStart(10, "0"));
+          this.broadcast({ deleted: msgId });
+        }
+        return;
+      }
+
+      if (data.message) {
+        let msgObj = { name: session.name, message: "" + data.message };
+
+        msgObj.timestamp = Math.max(Date.now(), this.lastTimestamp + 1);
+        this.lastTimestamp = msgObj.timestamp;
+
+        this.messageCounter++;
+        msgObj.id = this.messageCounter.toString();
+
+        // Save and maintain history threshold
+        this.messages.push(msgObj);
+        if (this.messages.length > 1000) {
+          let removed = this.messages.shift();
+          this.storage.delete("msg_" + removed.id.padStart(10, "0"));
+        }
+        this.storage.put("msg_" + msgObj.id.padStart(10, "0"), msgObj);
+
+        this.broadcast(msgObj);
+      }
     } catch (err) {
-      // Report any exceptions directly back to the client. As with our handleErrors() this
-      // probably isn't what you'd want to do in production, but it's convenient when testing.
-      webSocket.send(JSON.stringify({error: err.stack}));
+      webSocket.send(JSON.stringify({ error: err.stack }));
     }
   }
 
-  // On "close" and "error" events, remove the WebSocket from the sessions list and broadcast
-  // a quit message.
   async closeOrErrorHandler(webSocket) {
     let session = this.sessions.get(webSocket) || {};
     session.quit = true;
     this.sessions.delete(webSocket);
     if (session.name) {
-      this.broadcast({quit: session.name});
+      this.broadcast({ quit: session.name });
     }
   }
 
   async webSocketClose(webSocket, code, reason, wasClean) {
-    this.closeOrErrorHandler(webSocket)
+    this.closeOrErrorHandler(webSocket);
   }
 
   async webSocketError(webSocket, error) {
-    this.closeOrErrorHandler(webSocket)
+    this.closeOrErrorHandler(webSocket);
   }
 
-  // broadcast() broadcasts a message to all clients.
   broadcast(message) {
-    // Apply JSON if we weren't given a string to start with.
     if (typeof message !== "string") {
       message = JSON.stringify(message);
     }
 
-    // Iterate over all the sessions sending them messages.
     let quitters = [];
     this.sessions.forEach((session, webSocket) => {
       if (session.name) {
         try {
           webSocket.send(message);
         } catch (err) {
-          // Whoops, this connection is dead. Remove it from the map and arrange to notify
-          // everyone below.
           session.quit = true;
           quitters.push(session);
           this.sessions.delete(webSocket);
         }
       } else {
-        // This session hasn't sent the initial user info message yet, so we're not sending them
-        // messages yet (no secret lurking!). Queue the message to be sent later.
         session.blockedMessages.push(message);
       }
     });
 
     quitters.forEach(quitter => {
       if (quitter.name) {
-        this.broadcast({quit: quitter.name});
+        this.broadcast({ quit: quitter.name });
       }
     });
   }
 }
-
