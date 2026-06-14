@@ -272,7 +272,7 @@ export class ChatRoom {
     this.roomPassword = null;
     this.state.blockConcurrencyWhile(async () => {
         let storedPassword = await this.storage.get("roomPassword");
-        if (storedPassword) {
+        if (storedPassword !== undefined) {
             this.roomPassword = storedPassword;
         }
     });
