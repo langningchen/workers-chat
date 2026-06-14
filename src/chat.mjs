@@ -111,10 +111,9 @@ export default {
         case "upload": {
           if (request.method !== 'POST') return new Response('Method not allowed', {status: 405});
           const Image = await request.text();
-          let ImageID = '';
-          for (let i = 0; i < 32; i++) {
-              ImageID += String.fromCharCode(Math.floor(Math.random() * 26) + 97);
-          }
+          let array = new Uint8Array(32);
+          crypto.getRandomValues(array);
+          let ImageID = Array.from(array, byte => ('0' + byte.toString(16)).slice(-2)).join('').substring(0, 32);
           const ImageData = Image.replace(/^data:image\/\w+;base64,/, '');
           if (!ImageData || ImageData.length === 0) return new Response('Invalid image', {status: 400});
           try {

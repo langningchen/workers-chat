@@ -12,6 +12,7 @@
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.3/purify.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked-katex-extension/lib/index.umd.js"></script>
@@ -416,6 +417,8 @@ function startChat() {
 let lastSeenTimestamp = 0;
 let wroteWelcomeMessages = false;
 
+let pingInterval = null;
+
 function join() {
   // If we are running via wrangler dev, use ws:
   const wss = document.location.protocol === "http:" ? "ws://" : "wss://";
@@ -450,7 +453,8 @@ function join() {
 
     // Send user info message.
     ws.send(JSON.stringify({name: username, password: password}));
-    setInterval(() => {
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 15000);
   });
@@ -509,10 +513,12 @@ function join() {
 
   ws.addEventListener("close", event => {
     console.log("WebSocket closed, reconnecting:", event.code, event.reason);
+    if (pingInterval) clearInterval(pingInterval);
     rejoin();
   });
   ws.addEventListener("error", event => {
     console.log("WebSocket error, reconnecting:", event);
+    if (pingInterval) clearInterval(pingInterval);
     rejoin();
   });
 }
@@ -547,7 +553,8 @@ function addChatMessage(name, text, timestamp) {
   content.style.width = "calc(100% - 150px)";
   
   if (name) {
-      content.innerHTML = window.marked ? window.marked.parse(text) : text;
+      let html = window.marked ? window.marked.parse(text) : text;
+      content.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
   } else {
       content.innerText = text;
   }
