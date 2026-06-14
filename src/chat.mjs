@@ -31,9 +31,8 @@
 // Required Environment
 // ===============================
 //
-// This worker, when deployed, must be configured with two environment bindings:
+// This worker, when deployed, must be configured with one environment binding:
 // * rooms: A Durable Object namespace binding mapped to the ChatRoom class.
-// * limiters: A Durable Object namespace binding mapped to the RateLimiter class.
 //
 // Incidentally, in pre-modules Workers syntax, "bindings" (like KV bindings, secrets, etc.)
 // appeared in your script as global variables, but in the new modules syntax, this is no longer
@@ -109,7 +108,59 @@ export default {
           // This is a request for `/api/...`, call the API handler.
           return handleApiRequest(path.slice(1), request, env);
 
+        case "upload": {
+          if (request.method !== 'POST') return new Response('Method not allowed', {status: 405});
+          const Image = await request.text();
+          let ImageID = '';
+          for (let i = 0; i < 32; i++) {
+              ImageID += String.fromCharCode(Math.floor(Math.random() * 26) + 97);
+          }
+          const ImageData = Image.replace(/^data:image\/\w+;base64,/, '');
+          if (!ImageData || ImageData.length === 0) return new Response('Invalid image', {status: 400});
+          try {
+              const response = await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg'), {
+                  method: 'PUT',
+                  headers: {
+                      'Authorization': 'Bearer ' + env.GithubPAT,
+                      'Content-Type': 'application/json',
+                      'User-Agent': 'langningchen-image',
+                  },
+                  body: JSON.stringify({
+                      message: `Upload from ${request.headers.get('CF-Connecting-IP')}`,
+                      content: ImageData
+                  })
+              });
+              if (!response.ok) return new Response('Upload failed', {status: 500});
+              return new Response(ImageID, { headers: { 'Content-Type': 'text/plain' }});
+          } catch (e) {
+              return new Response('Upload failed', {status: 500});
+          }
+        }
+
         default:
+          if (request.method === 'GET' && path[0].length === 32) {
+              const ImageID = path[0];
+              const clientETag = request.headers.get('If-None-Match');
+              const imageETag = `"${ImageID}"`;
+              if (clientETag === imageETag) return new Response(null, { status: 304 });
+              return await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg?1=1'), {
+                  method: 'GET',
+                  headers: {
+                      'Authorization': 'Bearer ' + env.GithubPAT,
+                      'Accept': 'application/vnd.github.v3.raw',
+                      'User-Agent': 'langningchen-image',
+                  },
+              }).then(async (res) => {
+                  if (!res.ok) return new Response('Image not found', { status: 404 });
+                  return new Response(await res.blob(), { 
+                      headers: { 
+                          'Content-Type': 'image/jpeg',
+                          'Cache-Control': 'public, max-age=31536000, immutable',
+                          'ETag': imageETag
+                      }, 
+                  });
+              });
+          }
           return new Response("Not found", {status: 404});
       }
     });
@@ -219,30 +270,23 @@ export class ChatRoom {
 
     // We will track metadata for each client WebSocket object in `sessions`.
     this.sessions = new Map();
+    this.roomPassword = null;
+    this.state.blockConcurrencyWhile(async () => {
+        let storedPassword = await this.storage.get("roomPassword");
+        if (storedPassword) {
+            this.roomPassword = storedPassword;
+        }
+    });
+
     this.state.getWebSockets().forEach((webSocket) => {
       // The constructor may have been called when waking up from hibernation,
       // so get previously serialized metadata for any existing WebSockets.
       let meta = webSocket.deserializeAttachment();
 
-      // Set up our rate limiter client.
-      // The client itself can't have been in the attachment, because structured clone doesn't work on functions.
-      // DO ids aren't cloneable, restore the ID from its hex string
-      let limiterId = this.env.limiters.idFromString(meta.limiterId);
-      let limiter = new RateLimiterClient(
-        () => this.env.limiters.get(limiterId),
-        err => webSocket.close(1011, err.stack));
-
-      // We don't send any messages to the client until it has sent us the initial user info
-      // message. Until then, we will queue messages in `session.blockedMessages`.
-      // This could have been arbitrarily large, so we won't put it in the attachment.
       let blockedMessages = [];
-      this.sessions.set(webSocket, { ...meta, limiter, blockedMessages });
+      this.sessions.set(webSocket, { ...meta, blockedMessages });
     });
 
-    // We keep track of the last-seen message's timestamp just so that we can assign monotonically
-    // increasing timestamps even if multiple messages arrive simultaneously (see below). There's
-    // no need to store this to disk since we assume if the object is destroyed and recreated, much
-    // more than a millisecond will have gone by.
     this.lastTimestamp = 0;
   }
 
@@ -287,20 +331,21 @@ export class ChatRoom {
 
   // handleSession() implements our WebSocket-based chat protocol.
   async handleSession(webSocket, ip) {
+    if (this.sessions.size >= 2) {
+      webSocket.accept();
+      webSocket.send(JSON.stringify({error: "Room is full."}));
+      webSocket.close(1011, "Room is full");
+      return;
+    }
+
     // Accept our end of the WebSocket. This tells the runtime that we'll be terminating the
     // WebSocket in JavaScript, not sending it elsewhere.
     this.state.acceptWebSocket(webSocket);
 
-    // Set up our rate limiter client.
-    let limiterId = this.env.limiters.idFromName(ip);
-    let limiter = new RateLimiterClient(
-        () => this.env.limiters.get(limiterId),
-        err => webSocket.close(1011, err.stack));
-
     // Create our session and add it to the sessions map.
-    let session = { limiterId, limiter, blockedMessages: [] };
+    let session = { blockedMessages: [] };
     // attach limiterId to the webSocket so it survives hibernation
-    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), limiterId: limiterId.toString() });
+    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment() });
     this.sessions.set(webSocket, session);
 
     // Queue "join" messages for all online users, to populate the client's roster.
@@ -309,35 +354,18 @@ export class ChatRoom {
         session.blockedMessages.push(JSON.stringify({joined: otherSession.name}));
       }
     }
-
-    // Load the last 100 messages from the chat history stored on disk, and send them to the
-    // client.
-    let storage = await this.storage.list({reverse: true, limit: 100});
-    let backlog = [...storage.values()];
-    backlog.reverse();
-    backlog.forEach(value => {
-      session.blockedMessages.push(value);
-    });
   }
 
   async webSocketMessage(webSocket, msg) {
     try {
       let session = this.sessions.get(webSocket);
       if (session.quit) {
-        // Whoops, when trying to send to this WebSocket in the past, it threw an exception and
-        // we marked it broken. But somehow we got another message? I guess try sending a
-        // close(), which might throw, in which case we'll try to send an error, which will also
-        // throw, and whatever, at least we won't accept the message. (This probably can't
-        // actually happen. This is defensive coding.)
         webSocket.close(1011, "WebSocket broken.");
         return;
       }
 
-      // Check if the user is over their rate limit and reject the message if so.
-      if (!session.limiter.checkLimit()) {
-        webSocket.send(JSON.stringify({
-          error: "Your IP is being rate-limited, please try again later."
-        }));
+      if (msg === "ping") {
+        webSocket.send("pong");
         return;
       }
 
@@ -345,6 +373,21 @@ export class ChatRoom {
       let data = JSON.parse(msg);
 
       if (!session.name) {
+        if (!data.name || !data.password) {
+          webSocket.send(JSON.stringify({error: "Name and password required."}));
+          webSocket.close(1008, "Name and password required.");
+          return;
+        }
+
+        if (this.roomPassword === null) {
+          this.roomPassword = data.password;
+          this.storage.put("roomPassword", this.roomPassword);
+        } else if (this.roomPassword !== data.password) {
+          webSocket.send(JSON.stringify({error: "Incorrect password."}));
+          webSocket.close(1008, "Incorrect password.");
+          return;
+        }
+
         // The first message the client sends is the user info message with their name. Save it
         // into their session object.
         session.name = "" + (data.name || "anonymous");
@@ -372,15 +415,20 @@ export class ChatRoom {
         return;
       }
 
-      // Construct sanitized message for storage and broadcast.
-      data = { name: session.name, message: "" + data.message };
-
-      // Block people from sending overly long messages. This is also enforced on the client,
-      // so to trigger this the user must be bypassing the client code.
-      if (data.message.length > 256) {
-        webSocket.send(JSON.stringify({error: "Message too long."}));
+      // Handle name change
+      if (data.message.startsWith("/nick ")) {
+        let newName = data.message.substring(6).trim();
+        if (newName.length > 0 && newName.length <= 32) {
+            let oldName = session.name;
+            session.name = newName;
+            webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
+            this.broadcast({nameChange: {old: oldName, new: newName}});
+        }
         return;
       }
+
+      // Construct sanitized message for storage and broadcast.
+      data = { name: session.name, message: "" + data.message };
 
       // Add timestamp. Here's where this.lastTimestamp comes in -- if we receive a bunch of
       // messages at the same time (or if the clock somehow goes backwards????), we'll assign
@@ -392,9 +440,7 @@ export class ChatRoom {
       let dataStr = JSON.stringify(data);
       this.broadcast(dataStr);
 
-      // Save message.
-      let key = new Date(data.timestamp).toISOString();
-      await this.storage.put(key, dataStr);
+      // Do NOT save message (burn after reading).
     } catch (err) {
       // Report any exceptions directly back to the client. As with our handleErrors() this
       // probably isn't what you'd want to do in production, but it's convenient when testing.
@@ -456,110 +502,3 @@ export class ChatRoom {
   }
 }
 
-// =======================================================================================
-// The RateLimiter Durable Object class.
-
-// RateLimiter implements a Durable Object that tracks the frequency of messages from a particular
-// source and decides when messages should be dropped because the source is sending too many
-// messages.
-//
-// We utilize this in ChatRoom, above, to apply a per-IP-address rate limit. These limits are
-// global, i.e. they apply across all chat rooms, so if a user spams one chat room, they will find
-// themselves rate limited in all other chat rooms simultaneously.
-export class RateLimiter {
-  constructor(state, env) {
-    // Timestamp at which this IP will next be allowed to send a message. Start in the distant
-    // past, i.e. the IP can send a message now.
-    this.nextAllowedTime = 0;
-  }
-
-  // Our protocol is: POST when the IP performs an action, or GET to simply read the current limit.
-  // Either way, the result is the number of seconds to wait before allowing the IP to perform its
-  // next action.
-  async fetch(request) {
-    return await handleErrors(request, async () => {
-      let now = Date.now() / 1000;
-
-      this.nextAllowedTime = Math.max(now, this.nextAllowedTime);
-
-      if (request.method == "POST") {
-        // POST request means the user performed an action.
-        // We allow one action per 5 seconds.
-        this.nextAllowedTime += 5;
-      }
-
-      // Return the number of seconds that the client needs to wait.
-      //
-      // We provide a "grace" period of 20 seconds, meaning that the client can make 4-5 requests
-      // in a quick burst before they start being limited.
-      let cooldown = Math.max(0, this.nextAllowedTime - now - 20);
-      return new Response(cooldown);
-    })
-  }
-}
-
-// RateLimiterClient implements rate limiting logic on the caller's side.
-class RateLimiterClient {
-  // The constructor takes two functions:
-  // * getLimiterStub() returns a new Durable Object stub for the RateLimiter object that manages
-  //   the limit. This may be called multiple times as needed to reconnect, if the connection is
-  //   lost.
-  // * reportError(err) is called when something goes wrong and the rate limiter is broken. It
-  //   should probably disconnect the client, so that they can reconnect and start over.
-  constructor(getLimiterStub, reportError) {
-    this.getLimiterStub = getLimiterStub;
-    this.reportError = reportError;
-
-    // Call the callback to get the initial stub.
-    this.limiter = getLimiterStub();
-
-    // When `inCooldown` is true, the rate limit is currently applied and checkLimit() will return
-    // false.
-    this.inCooldown = false;
-  }
-
-  // Call checkLimit() when a message is received to decide if it should be blocked due to the
-  // rate limit. Returns `true` if the message should be accepted, `false` to reject.
-  checkLimit() {
-    if (this.inCooldown) {
-      return false;
-    }
-    this.inCooldown = true;
-    this.callLimiter();
-    return true;
-  }
-
-  // callLimiter() is an internal method which talks to the rate limiter.
-  async callLimiter() {
-    try {
-      let response;
-      try {
-        // Currently, fetch() needs a valid URL even though it's not actually going to the
-        // internet. We may loosen this in the future to accept an arbitrary string. But for now,
-        // we have to provide a dummy URL that will be ignored at the other end anyway.
-        response = await this.limiter.fetch("https://dummy-url", {method: "POST"});
-      } catch (err) {
-        // `fetch()` threw an exception. This is probably because the limiter has been
-        // disconnected. Stubs implement E-order semantics, meaning that calls to the same stub
-        // are delivered to the remote object in order, until the stub becomes disconnected, after
-        // which point all further calls fail. This guarantee makes a lot of complex interaction
-        // patterns easier, but it means we must be prepared for the occasional disconnect, as
-        // networks are inherently unreliable.
-        //
-        // Anyway, get a new limiter and try again. If it fails again, something else is probably
-        // wrong.
-        this.limiter = this.getLimiterStub();
-        response = await this.limiter.fetch("https://dummy-url", {method: "POST"});
-      }
-
-      // The response indicates how long we want to pause before accepting more requests.
-      let cooldown = +(await response.text());
-      await new Promise(resolve => setTimeout(resolve, cooldown * 1000));
-
-      // Done waiting.
-      this.inCooldown = false;
-    } catch (err) {
-      this.reportError(err);
-    }
-  }
-}
