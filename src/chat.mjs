@@ -2,6 +2,134 @@
 
 import HTML from "./chat.html";
 
+// =======================================================================================
+const SW_CODE = `
+const wsMap = new Map();
+const queueMap = new Map();
+const pingMap = new Map();
+
+function getOrCreateWs(room, user, pass, host, proto) {
+    if (wsMap.has(room)) {
+        let ws = wsMap.get(room);
+        if (ws.readyState === 0 || ws.readyState === 1) return ws;
+    }
+
+    const wssUrl = proto + '//' + host + '/api/room/' + room + '/websocket';
+    const ws = new WebSocket(wssUrl);
+    wsMap.set(room, ws);
+    
+    if (!queueMap.has(room)) queueMap.set(room, []);
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({name: user, password: pass}));
+        if (pingMap.has(room)) clearInterval(pingMap.get(room));
+        pingMap.set(room, setInterval(() => {
+            if (ws.readyState === 1) ws.send("ping");
+        }, 2000));
+    };
+
+    ws.onmessage = async (event) => {
+        if (event.data === "pong") return;
+        const data = JSON.parse(event.data);
+        
+        if (data.ready) {
+            ws._isReady = true;
+            let queue = queueMap.get(room);
+            while(queue && queue.length > 0) {
+                ws.send(queue.shift());
+            }
+        }
+
+        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
+        let hasVisibleClient = false;
+        clients.forEach(client => {
+            client.postMessage({type: 'WS_MSG', room: room, data: event.data});
+            if (client.visibilityState === 'visible' && client.url.includes('#' + room)) {
+                hasVisibleClient = true;
+            }
+        });
+
+        if (!hasVisibleClient && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
+            self.registration.showNotification(data.name + ' in #' + room, {
+                body: data.message,
+                icon: '/favicon.ico',
+                tag: room,
+                renotify: true,
+                data: { room, user, pass, host, proto },
+                actions: [
+                    {action: 'reply', title: 'Reply', type: 'text'}
+                ]
+            });
+        }
+    };
+
+    ws.onclose = () => {
+        ws._isReady = false;
+        if (pingMap.has(room)) {
+            clearInterval(pingMap.get(room));
+            pingMap.delete(room);
+        }
+        wsMap.delete(room);
+    };
+
+    ws.onerror = () => {
+        ws._isReady = false;
+    };
+
+    return ws;
+}
+
+self.addEventListener('install', event => self.skipWaiting());
+self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+
+self.addEventListener('message', event => {
+    const d = event.data;
+    if (!d || !d.room) return;
+
+    if (d.type === 'CONNECT') {
+        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+        if (ws.readyState === 1 && ws._isReady && d.requestHistory) {
+            ws.send(JSON.stringify({requestHistory: true}));
+        }
+    } else if (d.type === 'WS_SEND') {
+        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+        if (ws.readyState !== 1 || !ws._isReady) {
+            queueMap.get(d.room).push(d.data);
+        } else {
+            ws.send(d.data);
+        }
+    }
+});
+
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    const d = event.notification.data;
+    if (!d || !d.room) return;
+
+    if (event.action === 'reply') {
+        const replyText = event.reply;
+        if (replyText) {
+            const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+            const msgStr = JSON.stringify({message: replyText});
+            if (ws.readyState !== 1 || !ws._isReady) {
+                queueMap.get(d.room).push(msgStr);
+            } else {
+                ws.send(msgStr);
+            }
+        }
+    } else {
+        event.waitUntil(
+            self.clients.matchAll({type: 'window'}).then(clients => {
+                for (let client of clients) {
+                    if (client.url.includes('#' + d.room) && 'focus' in client) return client.focus();
+                }
+                if (self.clients.openWindow) return self.clients.openWindow('/#' + d.room);
+            })
+        );
+    }
+});
+`;
+
 async function handleErrors(request, func) {
   try {
     return await func();
@@ -29,6 +157,9 @@ export default {
       }
 
       switch (path[0]) {
+        case "sw.js":
+          return new Response(SW_CODE, { headers: { "Content-Type": "application/javascript;charset=UTF-8" } });
+
         case "api":
           return handleApiRequest(path.slice(1), request, env);
 
@@ -159,9 +290,8 @@ export class ChatRoom {
 
     this.state.getWebSockets().forEach((webSocket) => {
       let meta = webSocket.deserializeAttachment();
-      let blockedMessages = [];
       let lastActive = Date.now();
-      this.sessions.set(webSocket, { ...meta, blockedMessages, lastActive });
+      this.sessions.set(webSocket, { ...meta, lastActive });
       webSocket.serializeAttachment({ ...meta, lastActive });
     });
 
@@ -217,18 +347,12 @@ export class ChatRoom {
   async handleSession(webSocket, ip) {
     this.state.acceptWebSocket(webSocket);
 
-    let session = { blockedMessages: [], lastActive: Date.now() };
+    let session = { lastActive: Date.now() };
     webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
     this.sessions.set(webSocket, session);
 
     if (!this.pingInterval) {
       this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
-    }
-
-    for (let otherSession of this.sessions.values()) {
-      if (otherSession.name) {
-        session.blockedMessages.push(JSON.stringify({ joined: otherSession.name }));
-      }
     }
   }
 
@@ -278,16 +402,22 @@ export class ChatRoom {
           return;
         }
 
+        // Send Current Roster ONLY to the newly joined user
+        let users = [];
+        this.sessions.forEach(s => { if (s.name) users.push(s.name); });
+        webSocket.send(JSON.stringify({ roster: users }));
+
         // Send history upon join
         webSocket.send(JSON.stringify({ history: this.messages }));
 
-        session.blockedMessages.forEach(queued => {
-          webSocket.send(queued);
-        });
-        delete session.blockedMessages;
-
-        this.broadcast({ joined: session.name });
+        // Broadcast join to ALL users (including sender so UI catches it as System notification)
+        this.broadcast({ joined: session.name, timestamp: Date.now() });
         webSocket.send(JSON.stringify({ ready: true }));
+        return;
+      }
+
+      if (data.requestHistory) {
+        webSocket.send(JSON.stringify({ history: this.messages }));
         return;
       }
 
@@ -298,7 +428,7 @@ export class ChatRoom {
           let oldName = session.name;
           session.name = newName;
           webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
-          this.broadcast({ nameChange: { old: oldName, new: newName } });
+          this.broadcast({ nameChange: { old: oldName, new: newName }, timestamp: Date.now() });
         }
         return;
       }
@@ -309,7 +439,6 @@ export class ChatRoom {
         let newText = data.text;
 
         let targetMsg = this.messages.find(m => m.id === msgId);
-        // Make sure user is the one who originally sent it
         if (targetMsg && targetMsg.name === session.name) {
           targetMsg.message = "" + newText;
           targetMsg.edited = true;
@@ -361,7 +490,7 @@ export class ChatRoom {
     session.quit = true;
     this.sessions.delete(webSocket);
     if (session.name) {
-      this.broadcast({ quit: session.name });
+      this.broadcast({ quit: session.name, timestamp: Date.now() });
     }
   }
 
@@ -388,14 +517,12 @@ export class ChatRoom {
           quitters.push(session);
           this.sessions.delete(webSocket);
         }
-      } else {
-        session.blockedMessages.push(message);
       }
     });
 
     quitters.forEach(quitter => {
       if (quitter.name) {
-        this.broadcast({ quit: quitter.name });
+        this.broadcast({ quit: quitter.name, timestamp: Date.now() });
       }
     });
   }

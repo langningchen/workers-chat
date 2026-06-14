@@ -16,6 +16,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.3/purify.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/mhchem.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked-katex-extension/lib/index.umd.js"></script>
   <script>
     window.onload = () => {
@@ -48,6 +49,11 @@
 
     #chatlog span.username {
       font-weight: bold;
+    }
+
+    /* Add hover effects for clickable usernames */
+    #chatlog span.username.clickable:hover {
+      text-decoration: underline;
     }
 
     #spacer {
@@ -212,6 +218,19 @@
     #go-private {
       width: 20em;
     }
+
+    .system-text {
+      font-style: italic;
+      color: #666;
+    }
+
+    .mention {
+      background-color: #ffeb3b;
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-weight: bold;
+      color: #000;
+    }
   </style>
 
   <!--===================================================================================-->
@@ -241,7 +260,7 @@
       <div id="spacer"></div>
     </div>
     <div id="roster"></div>
-    <input id="chat-input">
+    <input id="chat-input" placeholder="Type a message or /help">
   </form>
 </body>
 
@@ -250,6 +269,7 @@
 
 <script type="text/javascript">
   let currentWebSocket = null;
+  let isUsingSW = false;
 
   let nameForm = document.querySelector("#name-form");
   let nameInput = document.querySelector("#name-input");
@@ -272,9 +292,9 @@
 
   let hostname = window.location.host;
   if (hostname == "") {
-    // Probably testing the HTML locally.
     hostname = "edge-chat-demo.cloudflareworkers.com";
   }
+  const proto = document.location.protocol === "http:" ? "ws:" : "wss:";
 
   function startNameChooser() {
     nameForm.addEventListener("submit", event => {
@@ -347,7 +367,6 @@
   function startChat() {
     roomForm.remove();
 
-    // Normalize the room name a bit.
     roomname = roomname.replace(/[^a-zA-Z0-9_-]/g, "").replace(/_/g, "-").toLowerCase();
 
     if (roomname.length > 32 && !roomname.match(/^[0-9a-f]{64}$/)) {
@@ -358,31 +377,41 @@
     document.location.hash = "#" + roomname;
 
     chatInput.addEventListener("keydown", event => {
-      if (event.keyCode == 38) {
-        // up arrow
-        chatlog.scrollBy(0, -50);
-      } else if (event.keyCode == 40) {
-        // down arrow
-        chatlog.scrollBy(0, 50);
-      } else if (event.keyCode == 33) {
-        // page up
-        chatlog.scrollBy(0, -chatlog.clientHeight + 50);
-      } else if (event.keyCode == 34) {
-        // page down
-        chatlog.scrollBy(0, chatlog.clientHeight - 50);
-      }
+      if (event.keyCode == 38) chatlog.scrollBy(0, -50);
+      else if (event.keyCode == 40) chatlog.scrollBy(0, 50);
+      else if (event.keyCode == 33) chatlog.scrollBy(0, -chatlog.clientHeight + 50);
+      else if (event.keyCode == 34) chatlog.scrollBy(0, chatlog.clientHeight - 50);
     });
 
     chatroom.addEventListener("submit", event => {
       event.preventDefault();
+      let text = chatInput.value.trim();
+      if (text === "") return;
 
-      if (currentWebSocket && chatInput.value.trim() !== "") {
-        currentWebSocket.send(JSON.stringify({ message: chatInput.value }));
+      // Handle local commands
+      if (text === "/clear") {
+        document.querySelectorAll('.msg-item').forEach(e => e.remove());
+        addChatMessage("System", "Chat history cleared locally.", Date.now(), null, false, true);
         chatInput.value = "";
-
-        // Scroll to bottom whenever sending a message.
-        chatlog.scrollBy(0, 1e8);
+        return;
       }
+      if (text === "/help") {
+        let helpText = "**Available Commands:**\n" +
+          "`/nick <name>` - Change your nickname\n" +
+          "`/clear` - Clear local chat history\n" +
+          "`/help` - Show this help message\n\n" +
+          "**Tips:**\n" +
+          "- Click a user's name in chat to mention them.\n" +
+          "- Click an image to view it full screen.";
+        addChatMessage("System", helpText, Date.now(), null, false, true);
+        chatInput.value = "";
+        return;
+      }
+
+      // Normal message send
+      sendWsMessage({ message: text });
+      chatInput.value = "";
+      chatlog.scrollBy(0, 1e8);
     });
 
     chatInput.addEventListener("paste", async event => {
@@ -418,34 +447,86 @@
 
     chatInput.focus();
     document.body.addEventListener("click", event => {
-      // If the user clicked somewhere in the window without selecting any text, focus the chat input.
-      if (window.getSelection().toString() == "") {
-        chatInput.focus();
-      }
+      if (window.getSelection().toString() == "") chatInput.focus();
     });
 
     if ('visualViewport' in window) {
       window.visualViewport.addEventListener('resize', function (event) {
-        if (isAtBottom) {
-          chatlog.scrollBy(0, 1e8);
-        }
+        if (isAtBottom) chatlog.scrollBy(0, 1e8);
       });
-    }
-
-    if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
-      Notification.requestPermission();
     }
 
     join();
   }
 
+  function sendWsMessage(msgObj) {
+    let msgStr = JSON.stringify(msgObj);
+    if (isUsingSW) {
+      navigator.serviceWorker.ready.then(reg => {
+        if (reg.active) {
+          reg.active.postMessage({
+            type: 'WS_SEND', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, data: msgStr
+          });
+        }
+      });
+    } else if (currentWebSocket) {
+      currentWebSocket.send(msgStr);
+    }
+  }
+
   let lastSeenTimestamp = 0;
   let wroteWelcomeMessages = false;
-
   let pingInterval = null;
 
-  function join() {
-    const wss = document.location.protocol === "http:" ? "ws://" : "wss://";
+  async function join() {
+    if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
+      await Notification.requestPermission();
+    }
+
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+
+        navigator.serviceWorker.addEventListener('message', event => {
+          if (event.data && event.data.type === 'WS_MSG' && event.data.room === roomname) {
+            handleWsMessage(event.data.data);
+          }
+        });
+
+        await navigator.serviceWorker.ready;
+
+        const connectPayload = {
+          type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: true
+        };
+
+        if (navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage(connectPayload);
+        } else {
+          reg.active.postMessage(connectPayload);
+        }
+
+        isUsingSW = true;
+
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+          if (navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+              type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: false
+            });
+          }
+        }, 5000);
+
+        return;
+      } catch (e) {
+        console.error("SW fallback:", e);
+      }
+    }
+
+    fallbackJoin();
+  }
+
+  function fallbackJoin() {
+    const wss = proto === "ws:" ? "ws://" : "wss://";
     let ws = new WebSocket(wss + hostname + "/api/room/" + roomname + "/websocket");
     let rejoined = false;
     let startTime = Date.now();
@@ -455,16 +536,14 @@
         rejoined = true;
         currentWebSocket = null;
 
-        while (roster.firstChild) {
-          roster.removeChild(roster.firstChild);
-        }
+        while (roster.firstChild) roster.removeChild(roster.firstChild);
 
         let timeSinceLastJoin = Date.now() - startTime;
         if (timeSinceLastJoin < 10000) {
           await new Promise(resolve => setTimeout(resolve, 10000 - timeSinceLastJoin));
         }
 
-        join();
+        fallbackJoin();
       }
     }
 
@@ -472,7 +551,6 @@
       currentWebSocket = ws;
       ws.send(JSON.stringify({ name: username, password: password }));
 
-      // Ping faster: every 2s
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send("ping");
@@ -480,124 +558,137 @@
     });
 
     ws.addEventListener("message", event => {
-      if (event.data === "pong") return;
-      let data = JSON.parse(event.data);
-
-      if (data.error) {
-        addChatMessage(null, "* Error: " + data.error, Date.now());
-      } else if (data.joined) {
-        let p = document.createElement("p");
-        p.innerText = data.joined;
-        roster.appendChild(p);
-      } else if (data.nameChange) {
-        addChatMessage(null, `* ${data.nameChange.old} is now known as ${data.nameChange.new}`, Date.now());
-        for (let child of roster.childNodes) {
-          if (child.innerText == data.nameChange.old) {
-            child.innerText = data.nameChange.new;
-            break;
-          }
-        }
-      } else if (data.quit) {
-        for (let child of roster.childNodes) {
-          if (child.innerText == data.quit) {
-            roster.removeChild(child);
-            break;
-          }
-        }
-      } else if (data.ready) {
-        if (!wroteWelcomeMessages) {
-          wroteWelcomeMessages = true;
-          addChatMessage(null,
-            "* This is a demo app built with Cloudflare Workers Durable Objects.", Date.now());
-          if (roomname.length == 64) {
-            addChatMessage(null,
-              "* This is a private room.", Date.now());
-          } else {
-            addChatMessage(null,
-              "* Welcome to #" + roomname + ". Say hi! You can use Markdown, paste images, and change name with /nick <name>", Date.now());
-          }
-        }
-      } else if (data.history) {
-        data.history.forEach(m => {
-          if (m.timestamp > lastSeenTimestamp) lastSeenTimestamp = m.timestamp;
-          addChatMessage(m.name, m.message, m.timestamp, m.id, m.edited);
-        });
-        setTimeout(() => chatlog.scrollBy(0, 1e8), 100);
-      } else if (data.edited) {
-        let msgDiv = document.getElementById("msg_" + data.edited);
-        if (msgDiv) {
-          let senderName = msgDiv.getAttribute("data-name");
-          renderMessageContent(msgDiv, senderName, data.text, data.edited, true);
-        }
-      } else if (data.deleted) {
-        let msgDiv = document.getElementById("msg_" + data.deleted);
-        if (msgDiv) {
-          msgDiv.remove();
-        }
-      } else {
-        // A regular chat message.
-        if (data.timestamp > lastSeenTimestamp) {
-          addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
-          lastSeenTimestamp = data.timestamp;
-
-          if (document.hidden && Notification.permission === "granted") {
-            new Notification("New message in Chat", { icon: "/favicon.ico" });
-          }
-        }
-      }
+      handleWsMessage(event.data);
     });
 
     ws.addEventListener("close", event => {
-      console.log("WebSocket closed, reconnecting:", event.code, event.reason);
       if (pingInterval) clearInterval(pingInterval);
       rejoin();
     });
     ws.addEventListener("error", event => {
-      console.log("WebSocket error, reconnecting:", event);
       if (pingInterval) clearInterval(pingInterval);
       rejoin();
     });
   }
 
-  function renderMessageContent(msgDiv, name, text, id, isEdited) {
+  function handleWsMessage(dataStr) {
+    if (dataStr === "pong") return;
+    let data = JSON.parse(dataStr);
+
+    if (data.error) {
+      addChatMessage("System", "* Error: " + data.error, Date.now(), null, false, true);
+    } else if (data.roster) {
+      roster.innerHTML = "";
+      data.roster.forEach(name => {
+        let p = document.createElement("p");
+        p.innerText = name;
+        roster.appendChild(p);
+      });
+    } else if (data.joined) {
+      let exists = Array.from(roster.childNodes).some(c => c.innerText === data.joined);
+      if (!exists) {
+        let p = document.createElement("p");
+        p.innerText = data.joined;
+        roster.appendChild(p);
+      }
+      addChatMessage("System", `**${data.joined === username ? "You" : data.joined}** joined the room.`, data.timestamp, null, false, true);
+    } else if (data.nameChange) {
+      addChatMessage("System", `**${data.nameChange.old === username ? "You are" : data.nameChange.old}** is now known as **${data.nameChange.new}**.`, data.timestamp, null, false, true);
+      for (let child of roster.childNodes) {
+        if (child.innerText == data.nameChange.old) {
+          child.innerText = data.nameChange.new;
+          break;
+        }
+      }
+    } else if (data.quit) {
+      for (let child of roster.childNodes) {
+        if (child.innerText == data.quit) {
+          roster.removeChild(child);
+          break;
+        }
+      }
+      addChatMessage("System", `**${data.quit}** left the room.`, data.timestamp, null, false, true);
+    } else if (data.ready) {
+      if (!wroteWelcomeMessages) {
+        wroteWelcomeMessages = true;
+        addChatMessage("System", "This is a demo app built with Cloudflare Workers Durable Objects.", Date.now(), null, false, true);
+        if (roomname.length == 64) {
+          addChatMessage("System", "This is a private room.", Date.now(), null, false, true);
+        } else {
+          addChatMessage("System", `Welcome to **#${roomname}**. Say hi! You can use Markdown, paste images, and type \`/help\` to view more commands.`, Date.now(), null, false, true);
+        }
+      }
+    } else if (data.history) {
+      document.querySelectorAll('.msg-item').forEach(e => e.remove());
+      data.history.forEach(m => {
+        if (m.timestamp > lastSeenTimestamp) lastSeenTimestamp = m.timestamp;
+        addChatMessage(m.name, m.message, m.timestamp, m.id, m.edited);
+      });
+      setTimeout(() => chatlog.scrollBy(0, 1e8), 100);
+    } else if (data.edited) {
+      let msgDiv = document.getElementById("msg_" + data.edited);
+      if (msgDiv) {
+        renderMessageContent(msgDiv, msgDiv.getAttribute("data-name"), data.text, data.edited, true);
+      }
+    } else if (data.deleted) {
+      let msgDiv = document.getElementById("msg_" + data.deleted);
+      if (msgDiv) msgDiv.remove();
+    } else {
+      if (data.timestamp > lastSeenTimestamp) {
+        addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
+        lastSeenTimestamp = data.timestamp;
+
+        // Fallback notification (only triggers if SW isn't managing connections)
+        if (!isUsingSW && document.hidden && Notification.permission === "granted" && data.name !== username) {
+          new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: data.message });
+        }
+      }
+    }
+  }
+
+  function renderMessageContent(msgDiv, name, text, id, isEdited, isSystem = false) {
     let content = msgDiv.querySelector(".content");
     if (!content) return;
     msgDiv.setAttribute("data-raw-text", text);
 
-    if (name) {
-      let html = window.marked ? window.marked.parse(text) : text;
-      content.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+    let html = window.marked ? window.marked.parse(text) : text;
+    html = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+
+    if (isSystem) {
+      content.innerHTML = html;
+      content.classList.add("system-text");
+    } else if (name) {
+      // Highlight mentions of me
+      if (html.includes(`@${username}`)) {
+        let mentionRegex = new RegExp(`@${username}\\b`, 'gi');
+        html = html.replace(mentionRegex, `<span class="mention">$&</span>`);
+      }
+
+      content.innerHTML = html;
+
+      let actionsSpan = document.createElement("span");
+      actionsSpan.style.marginLeft = "8px";
+      actionsSpan.style.fontSize = "0.8em";
 
       if (isEdited) {
         let editedSpan = document.createElement("span");
-        editedSpan.innerText = " (edited)";
-        editedSpan.style.fontSize = "0.8em";
+        editedSpan.innerText = "(edited) ";
         editedSpan.style.color = "#888";
-
-        let lastP = content.querySelector('p:last-of-type');
-        if (lastP) {
-          lastP.appendChild(editedSpan);
-        } else {
-          content.appendChild(editedSpan);
-        }
+        actionsSpan.appendChild(editedSpan);
       }
 
       if (name === username && id) {
-        let actions = document.createElement("div");
-        actions.style.marginTop = "4px";
-        actions.style.fontSize = "0.8em";
-
         let editBtn = document.createElement("a");
         editBtn.innerText = "[Edit]";
         editBtn.href = "javascript:void(0)";
-        editBtn.style.marginRight = "12px";
+        editBtn.style.marginRight = "6px";
         editBtn.style.color = "#0066cc";
         editBtn.style.textDecoration = "none";
         editBtn.onclick = () => {
           let rawText = msgDiv.getAttribute("data-raw-text");
           let newText = prompt("Edit message:", rawText);
           if (newText !== null && newText !== rawText && newText.trim() !== "") {
-            currentWebSocket.send(JSON.stringify({ edit: id, text: newText }));
+            sendWsMessage({ edit: id, text: newText });
           }
         };
 
@@ -608,17 +699,54 @@
         delBtn.style.textDecoration = "none";
         delBtn.onclick = () => {
           if (confirm("Delete this message?")) {
-            currentWebSocket.send(JSON.stringify({ delete: id }));
+            sendWsMessage({ delete: id });
           }
         };
 
-        actions.appendChild(editBtn);
-        actions.appendChild(delBtn);
-        content.appendChild(actions);
+        actionsSpan.appendChild(editBtn);
+        actionsSpan.appendChild(delBtn);
+      }
+
+      if (actionsSpan.hasChildNodes()) {
+        let lastP = content.querySelector('p:last-of-type');
+        if (lastP) {
+          lastP.style.display = 'inline'; // Align on the same text line
+          lastP.appendChild(actionsSpan);
+        } else {
+          content.appendChild(actionsSpan);
+        }
       }
     } else {
       content.innerText = text;
     }
+
+    // Img click to enlarge lightbox
+    content.querySelectorAll('img').forEach(img => {
+      img.style.cursor = "pointer";
+      img.title = "Click to enlarge";
+      img.onclick = () => {
+        let overlay = document.createElement("div");
+        overlay.style.position = "fixed";
+        overlay.style.top = "0"; overlay.style.left = "0";
+        overlay.style.width = "100%"; overlay.style.height = "100%";
+        overlay.style.backgroundColor = "rgba(0,0,0,0.85)";
+        overlay.style.zIndex = "1000";
+        overlay.style.display = "flex";
+        overlay.style.alignItems = "center";
+        overlay.style.justifyContent = "center";
+        overlay.style.cursor = "zoom-out";
+        overlay.onclick = () => overlay.remove();
+
+        let fullImg = document.createElement("img");
+        fullImg.src = img.src;
+        fullImg.style.maxWidth = "90%";
+        fullImg.style.maxHeight = "90%";
+        fullImg.style.borderRadius = "8px";
+        fullImg.style.boxShadow = "0 4px 12px rgba(0,0,0,0.5)";
+        overlay.appendChild(fullImg);
+        document.body.appendChild(overlay);
+      };
+    });
 
     const paragraphs = content.querySelectorAll('p');
     paragraphs.forEach(pg => {
@@ -627,8 +755,9 @@
     });
   }
 
-  function addChatMessage(name, text, timestamp, id, isEdited) {
+  function addChatMessage(name, text, timestamp, id, isEdited, isSystem = false) {
     let p = document.createElement("div");
+    p.className = "msg-item";
     p.style.marginBottom = "8px";
     if (id) {
       p.id = "msg_" + id;
@@ -652,6 +781,19 @@
       tag.style.display = "inline-block";
       tag.style.verticalAlign = "top";
       tag.style.marginRight = "4px";
+
+      if (!isSystem) {
+        tag.classList.add("clickable");
+        tag.title = "Click to mention";
+        tag.style.cursor = "pointer";
+        tag.onclick = () => {
+          chatInput.value += `@${name} `;
+          chatInput.focus();
+        };
+      } else {
+        tag.style.color = "#888";
+      }
+
       p.appendChild(tag);
     }
 
@@ -663,10 +805,9 @@
 
     p.appendChild(content);
 
-    // Append first to document so CSS renders appropriately
     chatlog.appendChild(p);
 
-    renderMessageContent(p, name, text, id, isEdited);
+    renderMessageContent(p, name, text, id, isEdited, isSystem);
 
     if (isAtBottom) {
       chatlog.scrollBy(0, 1e8);
