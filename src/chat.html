@@ -11,6 +11,18 @@
 <html>
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.3/purify.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-katex-extension/lib/index.umd.js"></script>
+    <script>
+      window.onload = () => {
+        if (window.marked && window.markedKatex) {
+          window.marked.use(window.markedKatex({throwOnError: false}));
+        }
+      };
+    </script>
 <!--===================================================================================-->
 <!-- Inline style to avoid an extra round trip before the page can render. -->
 <style type="text/css">
@@ -58,6 +70,11 @@ p:last-of-type {
   bottom: 32px;
   width: 200px;
   border-left: none;
+}
+
+#chatlog img {
+  max-width: 100%;
+  height: auto;
 }
 
 ::-webkit-scrollbar {
@@ -177,7 +194,9 @@ p:last-of-type {
   </head>
   <body>
     <form id="name-form" action="/fake-form-action">
-      <input id="name-input" placeholder="your name">
+      <input id="name-input" placeholder="your name" required>
+      <input id="password-input" type="password" placeholder="room password" required style="display:block; margin: 10px auto; font-size: inherit; text-align: center; border: 1px solid #bbb; width: 16em; height: 2em;">
+      <button type="submit" style="display:block; margin: 10px auto; font-size: inherit; height: 2em;">Next</button>
       <p>This chat runs entirely on the edge, powered by<br>
         <a href="https://blog.cloudflare.com/introducing-workers-durable-objects" target="_blank">Cloudflare Workers Durable Objects</a></p>
     </form>
@@ -204,6 +223,7 @@ let currentWebSocket = null;
 
 let nameForm = document.querySelector("#name-form");
 let nameInput = document.querySelector("#name-input");
+let passwordInput = document.querySelector("#password-input");
 let roomForm = document.querySelector("#room-form");
 let roomNameInput = document.querySelector("#room-name");
 let goPublicButton = document.querySelector("#go-public");
@@ -217,6 +237,7 @@ let roster = document.querySelector("#roster");
 let isAtBottom = true;
 
 let username;
+let password;
 let roomname;
 
 let hostname = window.location.host;
@@ -229,7 +250,8 @@ function startNameChooser() {
   nameForm.addEventListener("submit", event => {
     event.preventDefault();
     username = nameInput.value;
-    if (username.length > 0) {
+    password = passwordInput.value;
+    if (username.length > 0 && password.length > 0) {
       startRoomChooser();
     }
   });
@@ -333,9 +355,32 @@ function startChat() {
     }
   });
 
-  chatInput.addEventListener("input", event => {
-    if (event.currentTarget.value.length > 256) {
-      event.currentTarget.value = event.currentTarget.value.slice(0, 256);
+// We no longer limit message length on the client side
+
+  chatInput.addEventListener("paste", async event => {
+    let items = (event.clipboardData || event.originalEvent.clipboardData).items;
+    for (let index in items) {
+      let item = items[index];
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        event.preventDefault();
+        let blob = item.getAsFile();
+        let reader = new FileReader();
+        reader.onload = async (e) => {
+          let base64 = e.target.result;
+          chatInput.value += " (Uploading image...)";
+          try {
+            let response = await fetch('/upload', {
+              method: 'POST',
+              body: base64
+            });
+            let imageId = await response.text();
+            chatInput.value = chatInput.value.replace(" (Uploading image...)", `\n![](/${imageId})`);
+          } catch (err) {
+            chatInput.value = chatInput.value.replace(" (Uploading image...)", " (Upload failed)");
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
     }
   });
 
@@ -361,11 +406,18 @@ function startChat() {
     });
   }
 
+  // Request Notification permission
+  if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
+      Notification.requestPermission();
+  }
+
   join();
 }
 
 let lastSeenTimestamp = 0;
 let wroteWelcomeMessages = false;
+
+let pingInterval = null;
 
 function join() {
   // If we are running via wrangler dev, use ws:
@@ -400,18 +452,31 @@ function join() {
     currentWebSocket = ws;
 
     // Send user info message.
-    ws.send(JSON.stringify({name: username}));
+    ws.send(JSON.stringify({name: username, password: password}));
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 15000);
   });
 
   ws.addEventListener("message", event => {
+    if (event.data === "pong") return;
     let data = JSON.parse(event.data);
 
     if (data.error) {
-      addChatMessage(null, "* Error: " + data.error);
+      addChatMessage(null, "* Error: " + data.error, Date.now());
     } else if (data.joined) {
       let p = document.createElement("p");
       p.innerText = data.joined;
       roster.appendChild(p);
+    } else if (data.nameChange) {
+      addChatMessage(null, `* ${data.nameChange.old} is now known as ${data.nameChange.new}`, Date.now());
+      for (let child of roster.childNodes) {
+        if (child.innerText == data.nameChange.old) {
+          child.innerText = data.nameChange.new;
+          break;
+        }
+      }
     } else if (data.quit) {
       for (let child of roster.childNodes) {
         if (child.innerText == data.quit) {
@@ -424,48 +489,84 @@ function join() {
       if (!wroteWelcomeMessages) {
         wroteWelcomeMessages = true;
         addChatMessage(null,
-            "* This is a demo app built with Cloudflare Workers Durable Objects. The source code " +
-            "can be found at: https://github.com/cloudflare/workers-chat-demo");
-        addChatMessage(null,
-            "* WARNING: Participants in this chat are random people on the internet. " +
-            "Names are not authenticated; anyone can pretend to be anyone. The people " +
-            "you are chatting with are NOT Cloudflare employees. Chat history is saved.");
+            "* This is a demo app built with Cloudflare Workers Durable Objects.", Date.now());
         if (roomname.length == 64) {
           addChatMessage(null,
-              "* This is a private room. You can invite someone to the room by sending them the URL.");
+              "* This is a private room.", Date.now());
         } else {
           addChatMessage(null,
-              "* Welcome to #" + roomname + ". Say hi!");
+              "* Welcome to #" + roomname + ". Say hi! You can use Markdown, paste images, and change name with /nick <name>", Date.now());
         }
       }
     } else {
       // A regular chat message.
       if (data.timestamp > lastSeenTimestamp) {
-        addChatMessage(data.name, data.message);
+        addChatMessage(data.name, data.message, data.timestamp);
         lastSeenTimestamp = data.timestamp;
+        
+        if (document.hidden && Notification.permission === "granted") {
+            new Notification("New message in Chat", { icon: "/favicon.ico" });
+        }
       }
     }
   });
 
   ws.addEventListener("close", event => {
     console.log("WebSocket closed, reconnecting:", event.code, event.reason);
+    if (pingInterval) clearInterval(pingInterval);
     rejoin();
   });
   ws.addEventListener("error", event => {
     console.log("WebSocket error, reconnecting:", event);
+    if (pingInterval) clearInterval(pingInterval);
     rejoin();
   });
 }
 
-function addChatMessage(name, text) {
-  let p = document.createElement("p");
+function addChatMessage(name, text, timestamp) {
+  let p = document.createElement("div");
+  p.style.marginBottom = "8px";
+  
+  if (timestamp) {
+    let timeTag = document.createElement("span");
+    timeTag.style.color = "#888";
+    timeTag.style.fontSize = "0.8em";
+    timeTag.style.marginRight = "8px";
+    let date = new Date(timestamp);
+    timeTag.innerText = `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}]`;
+    p.appendChild(timeTag);
+  }
+
   if (name) {
     let tag = document.createElement("span");
     tag.className = "username";
     tag.innerText = name + ": ";
+    tag.style.display = "inline-block";
+    tag.style.verticalAlign = "top";
+    tag.style.marginRight = "4px";
     p.appendChild(tag);
   }
-  p.appendChild(document.createTextNode(text));
+  
+  let content = document.createElement("div");
+  content.style.display = "inline-block";
+  content.style.verticalAlign = "top";
+  content.style.width = "calc(100% - 150px)";
+  
+  if (name) {
+      let html = window.marked ? window.marked.parse(text) : text;
+      content.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+  } else {
+      content.innerText = text;
+  }
+  
+  // Fix nested paragraphs margin
+  const paragraphs = content.querySelectorAll('p');
+  paragraphs.forEach(p => {
+      p.style.marginTop = '0';
+      p.style.marginBottom = '4px';
+  });
+  
+  p.appendChild(content);
 
   // Append the new chat line, making sure that if the chatlog was scrolled to the bottom
   // before, it remains scrolled to the bottom, and otherwise the scroll position doesn't
