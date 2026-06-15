@@ -361,8 +361,8 @@
       }
     }
 
-    function updateReadCursor() {
-      if (isAtBottom && document.visibilityState === 'visible') {
+    function updateReadCursor(force = false) {
+      if (isAtBottom && (document.hasFocus() || force)) {
         if (highestMessageId > lastReadMessageId) {
           lastReadMessageId = highestMessageId;
           if (currentWebSocket && currentWebSocket.readyState === 1) {
@@ -372,6 +372,16 @@
         unreadAlert.style.display = "none";
       }
     }
+
+    const markReadOnInteraction = () => {
+      if (highestMessageId > lastReadMessageId) {
+        updateReadCursor(true);
+      }
+    };
+    window.addEventListener("focus", () => updateReadCursor(true));
+    document.addEventListener("mousemove", markReadOnInteraction);
+    document.addEventListener("keydown", markReadOnInteraction);
+    document.addEventListener("wheel", markReadOnInteraction);
 
     unreadAlert.addEventListener("click", () => {
       chatlog.scrollBy(0, 1e8);
@@ -678,17 +688,17 @@
 
         if (data.timestamp >= clearedAt && data.timestamp > lastSeenTimestamp) {
           let wasAtBottom = isAtBottom;
-          let isFocused = document.visibilityState === 'visible';
+          let isFocused = document.hasFocus();
 
           addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
           lastSeenTimestamp = data.timestamp;
 
           if (wasAtBottom && isFocused) {
             chatlog.scrollBy(0, 1e8);
-            updateReadCursor();
+            updateReadCursor(true);
           } else {
             unreadAlert.style.display = "block";
-            if (document.hidden && Notification.permission === "granted" && data.name !== username) {
+            if (!isFocused && Notification.permission === "granted" && data.name !== username) {
               let unreadCount = highestMessageId - lastReadMessageId;
               let bodyText = unreadCount > 0
                 ? `New message received (${unreadCount} unread)`
@@ -696,7 +706,8 @@
 
               new Notification(data.name + " in #" + roomname, {
                 icon: "/favicon.ico",
-                body: bodyText
+                body: bodyText,
+                tag: "chat-room-" + roomname
               });
             }
           }
