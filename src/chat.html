@@ -3,6 +3,7 @@
 
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Chat</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.3/purify.min.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
@@ -312,6 +313,56 @@
     let lastReadMessageId = 0;
     let highestMessageId = 0;
 
+    let pageIsVisible = document.visibilityState === 'visible';
+    let pageIsFocused = document.hasFocus();
+
+    document.addEventListener('visibilitychange', () => {
+      pageIsVisible = document.visibilityState === 'visible';
+      if (pageIsVisible) onPageBecameActive();
+    });
+    window.addEventListener('focus', () => {
+      pageIsFocused = true;
+      onPageBecameActive();
+    });
+    window.addEventListener('blur', () => {
+      pageIsFocused = false;
+      updateTitleBar();
+      notifyVisibility();
+    });
+
+    function isPageActive() {
+      return pageIsVisible && pageIsFocused;
+    }
+
+    function onPageBecameActive() {
+      updateReadCursor(true);
+      updateTitleBar();
+      notifyVisibility();
+    }
+
+    let titleUnreadCount = 0;
+
+    function updateTitleBar() {
+      if (!roomname) return;
+
+      if (isPageActive()) {
+        titleUnreadCount = 0;
+      }
+
+      if (titleUnreadCount > 0) {
+        document.title = `(${titleUnreadCount}) #${roomname} · Chat`;
+      } else {
+        document.title = `#${roomname} · Chat`;
+      }
+    }
+
+    function incrementTitleUnread() {
+      if (!isPageActive()) {
+        titleUnreadCount++;
+        updateTitleBar();
+      }
+    }
+
     let hostname = window.location.host;
     if (hostname == "") {
       hostname = "edge-chat-demo.cloudflareworkers.com";
@@ -362,26 +413,20 @@
     }
 
     function updateReadCursor(force = false) {
-      if (isAtBottom && (document.hasFocus() || force)) {
+      if ((isAtBottom || force) && isPageActive()) {
         if (highestMessageId > lastReadMessageId) {
           lastReadMessageId = highestMessageId;
           if (currentWebSocket && currentWebSocket.readyState === 1) {
             currentWebSocket.send(JSON.stringify({ readCursor: lastReadMessageId }));
           }
         }
-        unreadAlert.style.display = "none";
+        if (isAtBottom) {
+          unreadAlert.style.display = "none";
+        }
+        titleUnreadCount = 0;
+        updateTitleBar();
       }
     }
-
-    const markReadOnInteraction = () => {
-      if (highestMessageId > lastReadMessageId) {
-        updateReadCursor(true);
-      }
-    };
-    window.addEventListener("focus", () => updateReadCursor(true));
-    document.addEventListener("mousemove", markReadOnInteraction);
-    document.addEventListener("keydown", markReadOnInteraction);
-    document.addEventListener("wheel", markReadOnInteraction);
 
     unreadAlert.addEventListener("click", () => {
       chatlog.scrollBy(0, 1e8);
@@ -465,6 +510,7 @@
 
       roomname = roomname.replace(/[^a-zA-Z0-9_-]/g, "").replace(/_/g, "-").toLowerCase();
       document.location.hash = "#" + roomname;
+      updateTitleBar();
 
       chatInput.addEventListener("input", updatePreview);
 
@@ -537,13 +583,10 @@
     let pingInterval = null;
 
     function notifyVisibility() {
-      let isVisible = document.visibilityState === 'visible';
-      updateReadCursor();
       if (currentWebSocket && currentWebSocket.readyState === 1) {
-        currentWebSocket.send(JSON.stringify({ status: isVisible ? 'active' : 'background' }));
+        currentWebSocket.send(JSON.stringify({ status: isPageActive() ? 'active' : 'background' }));
       }
     }
-    document.addEventListener('visibilitychange', notifyVisibility);
 
     function updateRosterView(rosterArray) {
       rosterUsers.innerHTML = "";
@@ -601,11 +644,10 @@
         currentWebSocket = ws;
         addChatMessage("System", "Connected successfully.", Date.now(), null, false, true);
 
-        let isVisible = document.visibilityState === 'visible';
         ws.send(JSON.stringify({
           name: username,
           password: password,
-          status: isVisible ? 'active' : 'background'
+          status: isPageActive() ? 'active' : 'background'
         }));
 
         if (pingInterval) clearInterval(pingInterval);
@@ -686,19 +728,19 @@
         let msgIdInt = parseInt(data.id);
         if (msgIdInt > highestMessageId) highestMessageId = msgIdInt;
 
-        if (data.timestamp >= clearedAt && data.timestamp > lastSeenTimestamp) {
+        if (data.timestamp >= clearedAt) {
           let wasAtBottom = isAtBottom;
-          let isFocused = document.hasFocus();
-
           addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
           lastSeenTimestamp = data.timestamp;
 
-          if (wasAtBottom && isFocused) {
+          if (wasAtBottom && isPageActive()) {
             chatlog.scrollBy(0, 1e8);
             updateReadCursor(true);
           } else {
             unreadAlert.style.display = "block";
-            if (!isFocused && Notification.permission === "granted" && data.name !== username) {
+            incrementTitleUnread();
+
+            if (!isPageActive() && Notification.permission === "granted" && data.name !== username) {
               let unreadCount = highestMessageId - lastReadMessageId;
               let bodyText = unreadCount > 0
                 ? `New message received (${unreadCount} unread)`
