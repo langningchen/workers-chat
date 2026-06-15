@@ -1,7 +1,5 @@
 import HTML from "./chat.html";
 
-// =======================================================================================
-// Service Worker Code
 const SW_CODE = `
 const wsMap = new Map();
 const queueMap = new Map();
@@ -286,8 +284,6 @@ export class ChatRoom {
     this.messages = [];
     this.messageCounter = 0;
 
-    this.ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
     this.state.blockConcurrencyWhile(async () => {
       let storedPassword = await this.storage.get("roomPassword");
       if (storedPassword !== undefined) {
@@ -296,20 +292,21 @@ export class ChatRoom {
 
       let history = await this.storage.list({ prefix: "msg_", limit: 1000, reverse: true });
       let msgs = [];
-      let now = Date.now();
 
       for (let [key, value] of history) {
-        if (now - value.timestamp > this.ONE_DAY_MS) {
-          this.storage.delete(key);
-        } else {
-          msgs.push(value);
-          let idNum = parseInt(key.split("_")[1]);
-          if (idNum > this.messageCounter) {
-            this.messageCounter = idNum;
-          }
+        msgs.push(value);
+        let idNum = parseInt(key.split("_")[1]);
+        if (idNum > this.messageCounter) {
+          this.messageCounter = idNum;
         }
       }
+
       msgs.sort((a, b) => a.timestamp - b.timestamp);
+
+      while (msgs.length > 16) {
+        let removed = msgs.shift();
+        this.storage.delete("msg_" + removed.id.padStart(10, "0"));
+      }
       this.messages = msgs;
     });
 
@@ -370,13 +367,25 @@ export class ChatRoom {
   async handleSession(webSocket, ip) {
     this.state.acceptWebSocket(webSocket);
 
-    let session = { lastActive: Date.now(), status: 'active' };
-    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
+    let session = { lastActive: Date.now(), status: 'active', readCursor: this.messageCounter };
+    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive, readCursor: session.readCursor });
     this.sessions.set(webSocket, session);
 
     if (!this.pingInterval) {
       this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
     }
+  }
+
+  broadcastRoster() {
+    let users = [];
+    this.sessions.forEach(s => {
+      if (s.name) {
+        let unread = this.messageCounter - (s.readCursor || this.messageCounter);
+        if (unread < 0) unread = 0;
+        users.push({ name: s.name, status: s.status || 'active', unread: unread });
+      }
+    });
+    this.broadcast({ roster: users });
   }
 
   async webSocketMessage(webSocket, msg) {
@@ -397,11 +406,18 @@ export class ChatRoom {
 
       let data = JSON.parse(msg);
 
+      if (data.readCursor !== undefined) {
+        session.readCursor = data.readCursor;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), readCursor: session.readCursor });
+        this.broadcastRoster();
+        return;
+      }
+
       if (data.status && (!data.name && !data.message && !data.requestHistory)) {
         if (session.status !== data.status) {
           session.status = data.status;
           webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), status: session.status });
-          this.broadcast({ statusUpdate: { name: session.name, status: session.status } });
+          this.broadcastRoster();
         }
         return;
       }
@@ -443,14 +459,11 @@ export class ChatRoom {
 
         session.name = "" + data.name;
         session.status = data.status || 'active';
-        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name, status: session.status });
+        session.readCursor = this.messageCounter;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name, status: session.status, readCursor: session.readCursor });
 
-        let users = [];
-        this.sessions.forEach(s => { if (s.name) users.push({ name: s.name, status: s.status || 'active' }); });
-        webSocket.send(JSON.stringify({ roster: users }));
-
+        this.broadcastRoster();
         webSocket.send(JSON.stringify({ history: this.messages }));
-
         this.broadcast({ joined: session.name, status: session.status, timestamp: Date.now() });
         webSocket.send(JSON.stringify({ ready: true }));
         return;
@@ -483,6 +496,7 @@ export class ChatRoom {
           session.name = newName;
           webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
           this.broadcast({ nameChange: { old: oldName, new: newName }, timestamp: Date.now() });
+          this.broadcastRoster();
         }
         return;
       }
@@ -524,14 +538,18 @@ export class ChatRoom {
 
         this.messages.push(msgObj);
 
-        let cutoff = Date.now() - this.ONE_DAY_MS;
-        while (this.messages.length > 0 && (this.messages.length > 1000 || this.messages[0].timestamp < cutoff)) {
+        while (this.messages.length > 16) {
           let removed = this.messages.shift();
           this.storage.delete("msg_" + removed.id.padStart(10, "0"));
         }
 
         this.storage.put("msg_" + msgObj.id.padStart(10, "0"), msgObj);
+
+        session.readCursor = this.messageCounter;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), readCursor: session.readCursor });
+
         this.broadcast(msgObj);
+        this.broadcastRoster();
       }
     } catch (err) {
       webSocket.send(JSON.stringify({ error: err.stack }));
@@ -544,6 +562,7 @@ export class ChatRoom {
     this.sessions.delete(webSocket);
     if (session.name) {
       this.broadcast({ quit: session.name, timestamp: Date.now() });
+      this.broadcastRoster();
     }
   }
 
@@ -576,6 +595,7 @@ export class ChatRoom {
     quitters.forEach(quitter => {
       if (quitter.name) {
         this.broadcast({ quit: quitter.name, timestamp: Date.now() });
+        this.broadcastRoster();
       }
     });
   }

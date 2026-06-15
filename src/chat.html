@@ -38,6 +38,7 @@
       padding: 8px;
       overflow-wrap: break-word;
       background-color: #fff;
+      scroll-behavior: smooth;
     }
 
     #chatlog span.username {
@@ -46,10 +47,6 @@
 
     #chatlog span.username.clickable:hover {
       text-decoration: underline;
-    }
-
-    #spacer {
-      height: calc(100vh - 80px - 5em);
     }
 
     #roster {
@@ -75,10 +72,19 @@
       margin: 4px 0;
       display: flex;
       align-items: center;
+      justify-content: space-between;
     }
 
-    #chatlog img,
-    #live-preview img {
+    .unread-badge {
+      background-color: #ff4444;
+      color: white;
+      border-radius: 10px;
+      padding: 2px 6px;
+      font-size: 0.75em;
+      font-weight: bold;
+    }
+
+    #chatlog img {
       max-width: 50%;
       height: auto;
       vertical-align: middle;
@@ -94,27 +100,10 @@
       }
 
       #chatlog,
-      #live-preview,
-      #chat-input-container {
+      #chat-input-container,
+      #unread-alert {
         width: 100% !important;
       }
-    }
-
-    #live-preview {
-      position: fixed;
-      bottom: 80px;
-      left: 0;
-      width: calc(100% - 200px);
-      background: #f0f0f0;
-      color: #888;
-      padding: 8px 32px;
-      font-size: 0.95em;
-      border-top: 1px solid #ddd;
-      max-height: 100px;
-      overflow-y: auto;
-      display: none;
-      z-index: 2;
-      font-style: italic;
     }
 
     #chat-input-container {
@@ -216,6 +205,12 @@
       line-height: 1.5;
     }
 
+    #live-preview {
+      opacity: 0.5;
+      display: none;
+      margin-bottom: 8px;
+    }
+
     #editing-indicator {
       position: fixed;
       bottom: 80px;
@@ -228,6 +223,27 @@
       z-index: 4;
       font-weight: bold;
     }
+
+    #unread-alert {
+      position: fixed;
+      bottom: 90px;
+      right: 220px;
+      background-color: #007bff;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 0.9em;
+      cursor: pointer;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+      display: none;
+      z-index: 10;
+    }
+
+    @media(max-width:600px) {
+      #unread-alert {
+        right: 20px;
+      }
+    }
   </style>
 </head>
 
@@ -236,7 +252,7 @@
     <h2>Join Edge Chat</h2>
     <form id="auth-form" style="display:flex; flex-direction:column; align-items:center;">
       <input id="name-input" placeholder="Nickname" required pattern="[A-Za-z0-9\-_]+"
-        title="Only letters, numbers, hyphens, and underscores are allowed." autocomplete="username">
+        title="Only letters, numbers, hyphens, and underscores allowed." autocomplete="username">
       <input id="room-name" placeholder="Room Name" required>
       <input id="password-input" type="password" placeholder="Room Password (Optional)" autocomplete="current-password">
       <button type="submit">Connect</button>
@@ -245,10 +261,15 @@
 
   <form id="chatroom" action="/fake-form-action" style="display:none;">
     <div id="chatlog">
-      <div id="spacer"></div>
+      <div id="messages-container"></div>
+      <div id="live-preview" class="msg-item">
+        <span class="username">Preview: </span>
+        <div class="content" style="display:inline;"></div>
+      </div>
+      <div id="spacer" style="height: 10px;"></div>
     </div>
 
-    <div id="live-preview"></div>
+    <div id="unread-alert">↓ New messages</div>
 
     <div id="roster">
       <div id="roster-users"></div>
@@ -274,16 +295,23 @@
 
     let chatroom = document.querySelector("#chatroom");
     let chatlog = document.querySelector("#chatlog");
+    let msgContainer = document.querySelector("#messages-container");
     let livePreview = document.querySelector("#live-preview");
+    let livePreviewContent = livePreview.querySelector(".content");
     let chatInput = document.querySelector("#chat-input");
     let rosterUsers = document.querySelector("#roster-users");
     let editingIndicator = document.querySelector("#editing-indicator");
+    let unreadAlert = document.querySelector("#unread-alert");
 
     let isAtBottom = true;
     let username;
     let password;
     let roomname;
     let editingMsgId = null;
+
+    let lastSeenTimestamp = 0;
+    let lastReadMessageId = 0;
+    let highestMessageId = 0;
 
     let hostname = window.location.host;
     if (hostname == "") {
@@ -295,6 +323,18 @@
       let savedName = localStorage.getItem("chat_username");
       if (savedName) nameInput.value = savedName;
 
+      if (document.location.hash.length > 1) {
+        let hashRoom = document.location.hash.slice(1);
+        roomNameInput.value = hashRoom;
+        if (savedName) {
+          username = savedName;
+          roomname = hashRoom;
+          password = "";
+          startChat();
+          return;
+        }
+      }
+
       authForm.addEventListener("submit", event => {
         event.preventDefault();
         username = nameInput.value.trim();
@@ -303,7 +343,7 @@
 
         if (username.length > 0 && roomname.length > 0) {
           if (!username.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
-            alert("Invalid nickname. Only letters, numbers, hyphens, and underscores are allowed (Max 32 chars).");
+            alert("Invalid nickname. Only letters, numbers, hyphens, and underscores are allowed.");
             return;
           }
           localStorage.setItem("chat_username", username);
@@ -312,19 +352,28 @@
       });
 
       nameInput.addEventListener("input", event => {
-        if (event.currentTarget.value.length > 32) {
-          event.currentTarget.value = event.currentTarget.value.slice(0, 32);
-        }
+        if (event.currentTarget.value.length > 32) event.currentTarget.value = event.currentTarget.value.slice(0, 32);
       });
-
       roomNameInput.addEventListener("input", event => {
-        if (event.currentTarget.value.length > 32) {
-          event.currentTarget.value = event.currentTarget.value.slice(0, 32);
-        }
+        if (event.currentTarget.value.length > 32) event.currentTarget.value = event.currentTarget.value.slice(0, 32);
       });
-
       nameInput.focus();
     }
+
+    function updateReadCursor() {
+      if (isAtBottom && document.visibilityState === 'visible') {
+        if (highestMessageId > lastReadMessageId) {
+          lastReadMessageId = highestMessageId;
+          sendWsMessage({ readCursor: lastReadMessageId });
+        }
+        unreadAlert.style.display = "none";
+      }
+    }
+
+    unreadAlert.addEventListener("click", () => {
+      chatlog.scrollBy(0, 1e8);
+      unreadAlert.style.display = "none";
+    });
 
     function startEditing(id, rawText) {
       editingMsgId = id;
@@ -343,21 +392,23 @@
 
     function updatePreview() {
       let text = chatInput.value.trim();
-      if (text === "") {
+      if (text === "" || text.startsWith("/")) {
         livePreview.style.display = "none";
-        livePreview.innerHTML = "";
+        livePreviewContent.innerHTML = "";
         return;
       }
       livePreview.style.display = "block";
       let html = window.marked ? window.marked.parse(text) : text;
       html = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
-      livePreview.innerHTML = "<em>Preview:</em> " + html;
+      livePreviewContent.innerHTML = html;
 
-      livePreview.querySelectorAll('p').forEach(pg => {
+      livePreviewContent.querySelectorAll('p').forEach(pg => {
         pg.style.display = 'inline';
         pg.style.margin = '0';
         pg.style.padding = '0';
       });
+
+      if (isAtBottom) chatlog.scrollBy(0, 100);
     }
 
     function submitMessage() {
@@ -365,35 +416,24 @@
       if (text === "") return;
 
       if (text === "/clear") {
-        document.querySelectorAll('.msg-item').forEach(e => e.remove());
+        msgContainer.innerHTML = "";
         localStorage.setItem("clearedAt_" + roomname, Date.now());
-        addChatMessage("System", "Chat history cleared locally. Older messages are hidden from your browser.", Date.now(), null, false, true);
+        addChatMessage("System", "Chat history cleared locally. (Hidden from your view only)", Date.now(), null, false, true);
         cancelEditing();
         return;
       }
       if (text === "/help") {
-        let helpText = "**Available Commands:**\n\n" +
-          "- `/nick <name>` : Change your nickname\n" +
-          "- `/clear` : Clear local chat history (hides previous messages only for you)\n" +
-          "- `/shrug` : Append ¯\\_(ツ)_/¯\n" +
-          "- `/flip` : Append (╯°□°）╯︵ ┻━┻\n" +
-          "- `/roll` : Roll a random number 1-100\n" +
-          "- `/me <action>` : Perform an action (e.g. `/me dances` becomes *YourName dances*)\n" +
-          "- `/help` : Show this help message\n\n" +
+        let helpText = "**Commands:**\n\n" +
+          "- `/nick <name>` : Change nickname\n" +
+          "- `/clear` : Clear local chat view history\n" +
+          "- `/help` : Show this help\n\n" +
           "**Tips:**\n\n" +
-          "- Click a user's name to mention them.\n" +
-          "- Press **UP arrow** in empty input to edit your last message.\n" +
-          "- Use **Shift+Enter** to insert a new line.\n" +
-          "- Click an image to view it full screen.";
+          "- Press **UP arrow** in empty input to edit last message.\n" +
+          "- Use **Shift+Enter** to insert a new line.";
         addChatMessage("System", helpText, Date.now(), null, false, true);
         cancelEditing();
         return;
       }
-
-      if (text.startsWith("/shrug")) text = text.replace("/shrug", "").trim() + " ¯\\_(ツ)_/¯";
-      else if (text.startsWith("/flip")) text = text.replace("/flip", "").trim() + " (╯°□°）╯︵ ┻━┻";
-      else if (text.startsWith("/roll")) text = `*rolled a ${Math.floor(Math.random() * 100) + 1}*`;
-      else if (text.startsWith("/me ")) text = `*${text.substring(4)}*`;
 
       if (editingMsgId) {
         sendWsMessage({ edit: editingMsgId, text: text });
@@ -411,12 +451,6 @@
       chatroom.style.display = "block";
 
       roomname = roomname.replace(/[^a-zA-Z0-9_-]/g, "").replace(/_/g, "-").toLowerCase();
-
-      if (roomname.length > 32 && !roomname.match(/^[0-9a-f]{64}$/)) {
-        addChatMessage("System", "ERROR: Invalid room name.", Date.now(), null, false, true);
-        return;
-      }
-
       document.location.hash = "#" + roomname;
 
       chatInput.addEventListener("input", updatePreview);
@@ -437,10 +471,6 @@
         } else if (event.keyCode == 27 && editingMsgId) {
           cancelEditing();
           event.preventDefault();
-        } else if (event.keyCode == 33) {
-          chatlog.scrollBy(0, -chatlog.clientHeight + 50);
-        } else if (event.keyCode == 34) {
-          chatlog.scrollBy(0, chatlog.clientHeight - 50);
         }
       });
 
@@ -454,16 +484,16 @@
             let reader = new FileReader();
             reader.onload = async (e) => {
               let base64 = e.target.result;
-              chatInput.value += " (Uploading image...)";
+              chatInput.value += " (Uploading...)";
               updatePreview();
               try {
                 let response = await fetch('/upload', { method: 'POST', body: base64 });
                 if (!response.ok) throw new Error("Server rejected upload");
                 let imageId = await response.text();
-                chatInput.value = chatInput.value.replace(" (Uploading image...)", `\n![](/${imageId})`);
+                chatInput.value = chatInput.value.replace(" (Uploading...)", `\n![](/${imageId})`);
                 updatePreview();
               } catch (err) {
-                chatInput.value = chatInput.value.replace(" (Uploading image...)", " (Upload failed)");
+                chatInput.value = chatInput.value.replace(" (Uploading...)", " (Upload failed)");
                 updatePreview();
               }
             };
@@ -473,7 +503,8 @@
       });
 
       chatlog.addEventListener("scroll", event => {
-        isAtBottom = chatlog.scrollTop + chatlog.clientHeight >= chatlog.scrollHeight;
+        isAtBottom = chatlog.scrollTop + chatlog.clientHeight >= chatlog.scrollHeight - 20;
+        updateReadCursor();
       });
 
       chatInput.focus();
@@ -482,7 +513,7 @@
       });
 
       if ('visualViewport' in window) {
-        window.visualViewport.addEventListener('resize', function (event) {
+        window.visualViewport.addEventListener('resize', function () {
           if (isAtBottom) chatlog.scrollBy(0, 1e8);
         });
       }
@@ -505,17 +536,15 @@
       }
     }
 
-    let lastSeenTimestamp = 0;
-    let wroteWelcomeMessages = false;
     let pingInterval = null;
 
     function notifyVisibility() {
       let isVisible = document.visibilityState === 'visible';
+      updateReadCursor();
+
       if (isUsingSW && navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({
-          type: 'VISIBILITY',
-          room: roomname,
-          visible: isVisible
+          type: 'VISIBILITY', room: roomname, visible: isVisible
         });
       } else if (currentWebSocket && currentWebSocket.readyState === 1) {
         currentWebSocket.send(JSON.stringify({ status: isVisible ? 'active' : 'background' }));
@@ -533,20 +562,20 @@
         let icon = user.status === 'background' ? "🌙" : "🟢";
         let color = user.status === 'background' ? "#888" : "#000";
 
-        p.style.color = color;
-        p.innerText = `${icon} ${user.name}`;
+        let nameSpan = document.createElement("span");
+        nameSpan.innerText = `${icon} ${user.name}`;
+        nameSpan.style.color = color;
+        p.appendChild(nameSpan);
+
+        if (user.unread > 0) {
+          let badge = document.createElement("span");
+          badge.className = "unread-badge";
+          badge.innerText = user.unread;
+          p.appendChild(badge);
+        }
+
         rosterUsers.appendChild(p);
       });
-    }
-
-    function updateSingleRosterUser(name, status) {
-      let p = document.getElementById("roster-user-" + name);
-      if (p) {
-        let icon = status === 'background' ? "🌙" : "🟢";
-        let color = status === 'background' ? "#888" : "#000";
-        p.style.color = color;
-        p.innerText = `${icon} ${name}`;
-      }
     }
 
     async function join() {
@@ -620,7 +649,6 @@
         if (!rejoined && !stopReconnect) {
           rejoined = true;
           currentWebSocket = null;
-
           while (rosterUsers.firstChild) rosterUsers.removeChild(rosterUsers.firstChild);
 
           let timeSinceLastJoin = Date.now() - startTime;
@@ -669,27 +697,12 @@
 
       if (data.error) {
         addChatMessage("System", "* Error: " + data.error, Date.now(), null, false, true);
-        if (data.error.includes("password") || data.error.includes("Nickname") || data.error.includes("nickname")) {
+        if (data.error.includes("password") || data.error.includes("Nickname") || data.error.includes("nickname") || data.error.includes("Invalid")) {
           stopReconnect = true;
-          alert(data.error);
-          setTimeout(() => location.reload(), 1000);
         }
       } else if (data.roster) {
         updateRosterView(data.roster);
-      } else if (data.statusUpdate) {
-        updateSingleRosterUser(data.statusUpdate.name, data.statusUpdate.status);
       } else if (data.joined) {
-        let exists = document.getElementById("roster-user-" + data.joined);
-        if (!exists) {
-          let p = document.createElement("div");
-          p.className = "roster-user";
-          p.id = "roster-user-" + data.joined;
-          let icon = data.status === 'background' ? "🌙" : "🟢";
-          let color = data.status === 'background' ? "#888" : "#000";
-          p.style.color = color;
-          p.innerText = `${icon} ${data.joined}`;
-          rosterUsers.appendChild(p);
-        }
         if (data.timestamp >= clearedAt) {
           addChatMessage("System", `**${data.joined === username ? "You" : data.joined}** joined the room.`, data.timestamp, null, false, true);
         }
@@ -697,49 +710,49 @@
         if (data.timestamp >= clearedAt) {
           addChatMessage("System", `**${data.nameChange.old === username ? "You are" : data.nameChange.old}** is now known as **${data.nameChange.new}**.`, data.timestamp, null, false, true);
         }
-        let oldEl = document.getElementById("roster-user-" + data.nameChange.old);
-        if (oldEl) {
-          oldEl.id = "roster-user-" + data.nameChange.new;
-          oldEl.innerText = oldEl.innerText.replace(data.nameChange.old, data.nameChange.new);
-        }
       } else if (data.quit) {
-        let el = document.getElementById("roster-user-" + data.quit);
-        if (el) el.remove();
-
         if (data.timestamp >= clearedAt) {
           addChatMessage("System", `**${data.quit}** left the room.`, data.timestamp, null, false, true);
         }
       } else if (data.ready) {
-        if (!wroteWelcomeMessages) {
-          wroteWelcomeMessages = true;
-          addChatMessage("System", "Welcome to the application! Connection secured.", Date.now(), null, false, true);
-          addChatMessage("System", `**#${roomname}** is ready. Type \`/help\` to view commands.`, Date.now(), null, false, true);
-        }
+        addChatMessage("System", "Welcome to the application! Connection secured.", Date.now(), null, false, true);
+        updateReadCursor();
       } else if (data.history) {
-        document.querySelectorAll('.msg-item').forEach(e => e.remove());
+        msgContainer.innerHTML = "";
         data.history.forEach(m => {
+          let msgIdInt = parseInt(m.id);
+          if (msgIdInt > highestMessageId) highestMessageId = msgIdInt;
+
           if (m.timestamp >= clearedAt) {
             if (m.timestamp > lastSeenTimestamp) lastSeenTimestamp = m.timestamp;
-            addChatMessage(m.name, m.message, m.timestamp, m.id, m.edited);
+            addChatMessage(m.name, m.message, m.timestamp, m.id, m.edited, false, true);
           }
         });
-        setTimeout(() => chatlog.scrollBy(0, 1e8), 100);
+        setTimeout(() => {
+          chatlog.scrollBy(0, 1e8);
+          updateReadCursor();
+        }, 100);
       } else if (data.edited) {
         let msgDiv = document.getElementById("msg_" + data.edited);
-        if (msgDiv) {
-          renderMessageContent(msgDiv, msgDiv.getAttribute("data-name"), data.text, data.edited, true);
-        }
+        if (msgDiv) renderMessageContent(msgDiv, msgDiv.getAttribute("data-name"), data.text, data.edited, true);
       } else if (data.deleted) {
         let msgDiv = document.getElementById("msg_" + data.deleted);
         if (msgDiv) msgDiv.remove();
       } else {
         // Normal chat message
+        let msgIdInt = parseInt(data.id);
+        if (msgIdInt > highestMessageId) highestMessageId = msgIdInt;
+
         if (data.timestamp >= clearedAt && data.timestamp > lastSeenTimestamp) {
+          let wasAtBottom = isAtBottom;
           addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
           lastSeenTimestamp = data.timestamp;
 
-          if (!isUsingSW && document.hidden && Notification.permission === "granted" && data.name !== username) {
-            new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: "New message received" });
+          if (wasAtBottom && document.visibilityState === 'visible') {
+            chatlog.scrollBy(0, 1e8);
+            updateReadCursor();
+          } else {
+            unreadAlert.style.display = "block";
           }
         }
       }
@@ -845,7 +858,7 @@
       });
     }
 
-    function addChatMessage(name, text, timestamp, id, isEdited, isSystem = false) {
+    function addChatMessage(name, text, timestamp, id, isEdited, isSystem = false, skipScroll = false) {
       let p = document.createElement("div");
       p.className = "msg-item";
       if (id) {
@@ -891,11 +904,11 @@
       content.style.display = "inline";
 
       p.appendChild(content);
-      chatlog.appendChild(p);
+      msgContainer.appendChild(p);
 
       renderMessageContent(p, name, text, id, isEdited, isSystem);
 
-      if (isAtBottom) {
+      if (!skipScroll && isAtBottom) {
         chatlog.scrollBy(0, 1e8);
       }
     }
