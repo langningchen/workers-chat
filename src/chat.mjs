@@ -3,6 +3,7 @@
 import HTML from "./chat.html";
 
 // =======================================================================================
+// Service Worker 代码，用于提供即使页面关闭时的后台连接保持与消息弹出通知 / 快捷回复能力
 const SW_CODE = `
 const wsMap = new Map();
 const queueMap = new Map();
@@ -49,6 +50,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
             }
         });
 
+        // 页面不在前台展示时推送通知，忽略系统消息
         if (!hasVisibleClient && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
             self.registration.showNotification(data.name + ' in #' + room, {
                 body: data.message,
@@ -70,6 +72,11 @@ function getOrCreateWs(room, user, pass, host, proto) {
             pingMap.delete(room);
         }
         wsMap.delete(room);
+        
+        // 当断开时，尝试在后台自发重连，尽量保活 SW WebSocket
+        setTimeout(() => {
+            getOrCreateWs(room, user, pass, host, proto);
+        }, 5000);
     };
 
     ws.onerror = () => {
@@ -109,13 +116,32 @@ self.addEventListener('notificationclick', event => {
     if (event.action === 'reply') {
         const replyText = event.reply;
         if (replyText) {
-            const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
-            const msgStr = JSON.stringify({message: replyText});
-            if (ws.readyState !== 1 || !ws._isReady) {
-                queueMap.get(d.room).push(msgStr);
-            } else {
-                ws.send(msgStr);
-            }
+            // 使用 event.waitUntil 包装 Promise，确保发送完成前浏览器不会中止 SW 进程
+            event.waitUntil(new Promise((resolve) => {
+                const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+                const msgStr = JSON.stringify({message: replyText});
+                
+                if (ws.readyState === 1 && ws._isReady) {
+                    ws.send(msgStr);
+                    resolve();
+                } else {
+                    if (!queueMap.has(d.room)) queueMap.set(d.room, []);
+                    queueMap.get(d.room).push(msgStr);
+                    
+                    // 轮询等待连接就绪后队列被消费
+                    let attempts = 0;
+                    let check = setInterval(() => {
+                        attempts++;
+                        if (ws.readyState === 1 && ws._isReady) {
+                            clearInterval(check);
+                            setTimeout(resolve, 500); // 给时间让队列发出
+                        } else if (ws.readyState === 3 || attempts > 20) { // 超过10秒放弃
+                            clearInterval(check);
+                            resolve();
+                        }
+                    }, 500);
+                }
+            }));
         }
     } else {
         event.waitUntil(

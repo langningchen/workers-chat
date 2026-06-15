@@ -61,8 +61,36 @@
     }
 
     #roster {
-      font-weight: bold;
+      position: fixed;
+      right: 0;
+      top: 0;
+      bottom: 32px;
+      width: 200px;
+      border-left: none;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #roster-users {
+      flex: 1;
+      overflow-y: auto;
       padding: 8px;
+      font-weight: bold;
+    }
+
+    #roster-actions {
+      padding: 8px;
+      border-top: 1px solid #ccc;
+      text-align: center;
+    }
+
+    #uninstall-sw {
+      font-size: 0.8em;
+      padding: 4px 8px;
+      cursor: pointer;
+      background-color: #fdd;
+      border: 1px solid #f99;
+      border-radius: 4px;
     }
 
     p {
@@ -74,18 +102,10 @@
       margin: 0;
     }
 
-    #roster {
-      position: fixed;
-      right: 0;
-      top: 0;
-      bottom: 32px;
-      width: 200px;
-      border-left: none;
-    }
-
     #chatlog img {
       max-width: 100%;
       height: auto;
+      vertical-align: middle;
     }
 
     ::-webkit-scrollbar {
@@ -231,6 +251,12 @@
       font-weight: bold;
       color: #000;
     }
+
+    .msg-item {
+      margin-bottom: 8px;
+      /* Ensure children flow inline naturally */
+      line-height: 1.5;
+    }
   </style>
 
   <!--===================================================================================-->
@@ -259,7 +285,13 @@
     <div id="chatlog">
       <div id="spacer"></div>
     </div>
-    <div id="roster"></div>
+    <div id="roster">
+      <div id="roster-users"></div>
+      <div id="roster-actions">
+        <button type="button" id="uninstall-sw" title="Uninstall Service Worker and use plain WebSocket">Disable
+          SW</button>
+      </div>
+    </div>
     <input id="chat-input" placeholder="Type a message or /help">
   </form>
 </body>
@@ -281,7 +313,8 @@
   let chatroom = document.querySelector("#chatroom");
   let chatlog = document.querySelector("#chatlog");
   let chatInput = document.querySelector("#chat-input");
-  let roster = document.querySelector("#roster");
+  let rosterUsers = document.querySelector("#roster-users");
+  let uninstallSwBtn = document.querySelector("#uninstall-sw");
 
   // Is the chatlog scrolled to the bottom?
   let isAtBottom = true;
@@ -295,6 +328,20 @@
     hostname = "edge-chat-demo.cloudflareworkers.com";
   }
   const proto = document.location.protocol === "http:" ? "ws:" : "wss:";
+
+  // Uninstall SW Event
+  uninstallSwBtn.addEventListener("click", async () => {
+    if ('serviceWorker' in navigator) {
+      let regs = await navigator.serviceWorker.getRegistrations();
+      for (let r of regs) {
+        await r.unregister();
+      }
+      alert("Service Worker has been uninstalled. The page will now reload.");
+      location.reload();
+    } else {
+      alert("No Service Worker is currently registered.");
+    }
+  });
 
   function startNameChooser() {
     nameForm.addEventListener("submit", event => {
@@ -388,7 +435,6 @@
       let text = chatInput.value.trim();
       if (text === "") return;
 
-      // Handle local commands
       if (text === "/clear") {
         document.querySelectorAll('.msg-item').forEach(e => e.remove());
         addChatMessage("System", "Chat history cleared locally.", Date.now(), null, false, true);
@@ -408,7 +454,6 @@
         return;
       }
 
-      // Normal message send
       sendWsMessage({ message: text });
       chatInput.value = "";
       chatlog.scrollBy(0, 1e8);
@@ -506,6 +551,7 @@
         }
 
         isUsingSW = true;
+        uninstallSwBtn.style.display = "inline-block";
 
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
@@ -526,6 +572,8 @@
   }
 
   function fallbackJoin() {
+    isUsingSW = false;
+    uninstallSwBtn.style.display = "none";
     const wss = proto === "ws:" ? "ws://" : "wss://";
     let ws = new WebSocket(wss + hostname + "/api/room/" + roomname + "/websocket");
     let rejoined = false;
@@ -536,7 +584,7 @@
         rejoined = true;
         currentWebSocket = null;
 
-        while (roster.firstChild) roster.removeChild(roster.firstChild);
+        while (rosterUsers.firstChild) rosterUsers.removeChild(rosterUsers.firstChild);
 
         let timeSinceLastJoin = Date.now() - startTime;
         if (timeSinceLastJoin < 10000) {
@@ -578,32 +626,32 @@
     if (data.error) {
       addChatMessage("System", "* Error: " + data.error, Date.now(), null, false, true);
     } else if (data.roster) {
-      roster.innerHTML = "";
+      rosterUsers.innerHTML = "";
       data.roster.forEach(name => {
         let p = document.createElement("p");
         p.innerText = name;
-        roster.appendChild(p);
+        rosterUsers.appendChild(p);
       });
     } else if (data.joined) {
-      let exists = Array.from(roster.childNodes).some(c => c.innerText === data.joined);
+      let exists = Array.from(rosterUsers.childNodes).some(c => c.innerText === data.joined);
       if (!exists) {
         let p = document.createElement("p");
         p.innerText = data.joined;
-        roster.appendChild(p);
+        rosterUsers.appendChild(p);
       }
       addChatMessage("System", `**${data.joined === username ? "You" : data.joined}** joined the room.`, data.timestamp, null, false, true);
     } else if (data.nameChange) {
       addChatMessage("System", `**${data.nameChange.old === username ? "You are" : data.nameChange.old}** is now known as **${data.nameChange.new}**.`, data.timestamp, null, false, true);
-      for (let child of roster.childNodes) {
+      for (let child of rosterUsers.childNodes) {
         if (child.innerText == data.nameChange.old) {
           child.innerText = data.nameChange.new;
           break;
         }
       }
     } else if (data.quit) {
-      for (let child of roster.childNodes) {
+      for (let child of rosterUsers.childNodes) {
         if (child.innerText == data.quit) {
-          roster.removeChild(child);
+          rosterUsers.removeChild(child);
           break;
         }
       }
@@ -638,7 +686,6 @@
         addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
         lastSeenTimestamp = data.timestamp;
 
-        // Fallback notification (only triggers if SW isn't managing connections)
         if (!isUsingSW && document.hidden && Notification.permission === "granted" && data.name !== username) {
           new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: data.message });
         }
@@ -658,7 +705,6 @@
       content.innerHTML = html;
       content.classList.add("system-text");
     } else if (name) {
-      // Highlight mentions of me
       if (html.includes(`@${username}`)) {
         let mentionRegex = new RegExp(`@${username}\\b`, 'gi');
         html = html.replace(mentionRegex, `<span class="mention">$&</span>`);
@@ -667,6 +713,7 @@
       content.innerHTML = html;
 
       let actionsSpan = document.createElement("span");
+      actionsSpan.style.display = "inline";
       actionsSpan.style.marginLeft = "8px";
       actionsSpan.style.fontSize = "0.8em";
 
@@ -708,19 +755,12 @@
       }
 
       if (actionsSpan.hasChildNodes()) {
-        let lastP = content.querySelector('p:last-of-type');
-        if (lastP) {
-          lastP.style.display = 'inline'; // Align on the same text line
-          lastP.appendChild(actionsSpan);
-        } else {
-          content.appendChild(actionsSpan);
-        }
+        content.appendChild(actionsSpan);
       }
     } else {
       content.innerText = text;
     }
 
-    // Img click to enlarge lightbox
     content.querySelectorAll('img').forEach(img => {
       img.style.cursor = "pointer";
       img.title = "Click to enlarge";
@@ -748,17 +788,18 @@
       };
     });
 
+    // Make ALL paragraphs strictly inline
     const paragraphs = content.querySelectorAll('p');
     paragraphs.forEach(pg => {
-      pg.style.marginTop = '0';
-      pg.style.marginBottom = '4px';
+      pg.style.display = 'inline';
+      pg.style.margin = '0';
+      pg.style.padding = '0';
     });
   }
 
   function addChatMessage(name, text, timestamp, id, isEdited, isSystem = false) {
     let p = document.createElement("div");
     p.className = "msg-item";
-    p.style.marginBottom = "8px";
     if (id) {
       p.id = "msg_" + id;
       p.setAttribute("data-name", name);
@@ -766,6 +807,7 @@
 
     if (timestamp) {
       let timeTag = document.createElement("span");
+      timeTag.style.display = "inline";
       timeTag.style.color = "#888";
       timeTag.style.fontSize = "0.8em";
       timeTag.style.marginRight = "8px";
@@ -777,9 +819,8 @@
     if (name) {
       let tag = document.createElement("span");
       tag.className = "username";
+      tag.style.display = "inline";
       tag.innerText = name + ": ";
-      tag.style.display = "inline-block";
-      tag.style.verticalAlign = "top";
       tag.style.marginRight = "4px";
 
       if (!isSystem) {
@@ -799,9 +840,7 @@
 
     let content = document.createElement("div");
     content.className = "content";
-    content.style.display = "inline-block";
-    content.style.verticalAlign = "top";
-    content.style.width = "calc(100% - 150px)";
+    content.style.display = "inline";
 
     p.appendChild(content);
 
