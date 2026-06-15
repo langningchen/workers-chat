@@ -33,33 +33,23 @@
       top: 0;
       bottom: 80px;
       left: 0;
-      width: calc(50% - 100px);
+      width: calc(100% - 200px);
       overflow-y: auto;
       padding: 8px;
       overflow-wrap: break-word;
       background-color: #fff;
     }
 
-    #preview-pane {
-      position: fixed;
-      top: 0;
-      bottom: 80px;
-      left: calc(50% - 100px);
-      width: calc(50% - 100px);
-      overflow-y: auto;
-      padding: 8px;
-      overflow-wrap: break-word;
-      background-color: #f2f2f2;
-      border-left: 1px solid #ddd;
-    }
-
-    #chatlog span.username,
-    #preview-pane span.username {
+    #chatlog span.username {
       font-weight: bold;
     }
 
     #chatlog span.username.clickable:hover {
       text-decoration: underline;
+    }
+
+    #spacer {
+      height: calc(100vh - 80px - 5em);
     }
 
     #roster {
@@ -78,11 +68,17 @@
       flex: 1;
       overflow-y: auto;
       padding: 8px;
-      font-weight: bold;
+      font-size: 0.95em;
+    }
+
+    .roster-user {
+      margin: 4px 0;
+      display: flex;
+      align-items: center;
     }
 
     #chatlog img,
-    #preview-pane img {
+    #live-preview img {
       max-width: 50%;
       height: auto;
       vertical-align: middle;
@@ -92,29 +88,38 @@
       display: none;
     }
 
-    @media(max-width:800px) {
-      #preview-pane {
-        display: none;
-      }
-
-      #chatlog {
-        width: calc(100% - 200px);
-      }
-    }
-
     @media(max-width:600px) {
       #roster {
         display: none;
       }
 
-      #chatlog {
-        width: 100%;
+      #chatlog,
+      #live-preview,
+      #chat-input-container {
+        width: 100% !important;
       }
+    }
+
+    #live-preview {
+      position: fixed;
+      bottom: 80px;
+      left: 0;
+      width: calc(100% - 200px);
+      background: #f0f0f0;
+      color: #888;
+      padding: 8px 32px;
+      font-size: 0.95em;
+      border-top: 1px solid #ddd;
+      max-height: 100px;
+      overflow-y: auto;
+      display: none;
+      z-index: 2;
+      font-style: italic;
     }
 
     #chat-input-container {
       position: fixed;
-      width: 100%;
+      width: calc(100% - 200px);
       height: 80px;
       bottom: 0;
       left: 0;
@@ -122,6 +127,7 @@
       border-top: 1px solid #ccc;
       display: flex;
       align-items: center;
+      z-index: 3;
     }
 
     #chat-input {
@@ -136,7 +142,7 @@
     }
 
     #chatroom::before {
-      z-index: 1;
+      z-index: 4;
       display: block;
       content: ">";
       position: fixed;
@@ -152,7 +158,7 @@
 
     .center-form-container {
       position: fixed;
-      z-index: 3;
+      z-index: 5;
       top: 0;
       left: 0;
       right: 0;
@@ -219,27 +225,21 @@
       font-size: 0.8em;
       padding: 4px 8px;
       display: none;
-      z-index: 2;
+      z-index: 4;
       font-weight: bold;
     }
   </style>
 </head>
 
 <body>
-  <div id="name-form-container" class="center-form-container">
-    <h2>Join Chat</h2>
-    <form id="name-form" style="display:flex; flex-direction:column; align-items:center;">
-      <input id="name-input" placeholder="Nickname" required autocomplete="username">
-      <input id="password-input" type="password" placeholder="Password (Optional)" autocomplete="current-password">
-      <button type="submit">Continue</button>
-    </form>
-  </div>
-
-  <div id="room-form-container" class="center-form-container" style="display:none; z-index:2;">
-    <h2>Select Room</h2>
-    <form id="room-form" style="display:flex; flex-direction:column; align-items:center;">
-      <input id="room-name" placeholder="Room name" required>
-      <button type="submit" id="go-public">Join / Create Room</button>
+  <div id="auth-form-container" class="center-form-container">
+    <h2>Join Edge Chat</h2>
+    <form id="auth-form" style="display:flex; flex-direction:column; align-items:center;">
+      <input id="name-input" placeholder="Nickname" required pattern="[A-Za-z0-9\-_]+"
+        title="Only letters, numbers, hyphens, and underscores are allowed." autocomplete="username">
+      <input id="room-name" placeholder="Room Name" required>
+      <input id="password-input" type="password" placeholder="Room Password (Optional)" autocomplete="current-password">
+      <button type="submit">Connect</button>
     </form>
   </div>
 
@@ -247,12 +247,13 @@
     <div id="chatlog">
       <div id="spacer"></div>
     </div>
-    <div id="preview-pane">
-      <div class="system-text">Live Preview...</div>
-    </div>
+
+    <div id="live-preview"></div>
+
     <div id="roster">
       <div id="roster-users"></div>
     </div>
+
     <div id="editing-indicator">Editing message (Press Esc to cancel)</div>
 
     <div id="chat-input-container">
@@ -263,19 +264,17 @@
   <script type="text/javascript">
     let currentWebSocket = null;
     let isUsingSW = false;
+    let stopReconnect = false;
 
-    let nameFormContainer = document.querySelector("#name-form-container");
-    let nameForm = document.querySelector("#name-form");
+    let authFormContainer = document.querySelector("#auth-form-container");
+    let authForm = document.querySelector("#auth-form");
     let nameInput = document.querySelector("#name-input");
-    let passwordInput = document.querySelector("#password-input");
-
-    let roomFormContainer = document.querySelector("#room-form-container");
-    let roomForm = document.querySelector("#room-form");
     let roomNameInput = document.querySelector("#room-name");
+    let passwordInput = document.querySelector("#password-input");
 
     let chatroom = document.querySelector("#chatroom");
     let chatlog = document.querySelector("#chatlog");
-    let previewPane = document.querySelector("#preview-pane");
+    let livePreview = document.querySelector("#live-preview");
     let chatInput = document.querySelector("#chat-input");
     let rosterUsers = document.querySelector("#roster-users");
     let editingIndicator = document.querySelector("#editing-indicator");
@@ -292,17 +291,23 @@
     }
     const proto = document.location.protocol === "http:" ? "ws:" : "wss:";
 
-    function startNameChooser() {
+    function startAuthForm() {
       let savedName = localStorage.getItem("chat_username");
       if (savedName) nameInput.value = savedName;
 
-      nameForm.addEventListener("submit", event => {
+      authForm.addEventListener("submit", event => {
         event.preventDefault();
         username = nameInput.value.trim();
+        roomname = roomNameInput.value.trim();
         password = passwordInput.value;
-        if (username.length > 0) {
+
+        if (username.length > 0 && roomname.length > 0) {
+          if (!username.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
+            alert("Invalid nickname. Only letters, numbers, hyphens, and underscores are allowed (Max 32 chars).");
+            return;
+          }
           localStorage.setItem("chat_username", username);
-          startRoomChooser();
+          startChat();
         }
       });
 
@@ -312,35 +317,13 @@
         }
       });
 
-      nameInput.focus();
-    }
-
-    function startRoomChooser() {
-      nameFormContainer.style.display = "none";
-
-      if (document.location.hash.length > 1) {
-        roomname = document.location.hash.slice(1);
-        startChat();
-        return;
-      }
-
-      roomFormContainer.style.display = "flex";
-
-      roomForm.addEventListener("submit", event => {
-        event.preventDefault();
-        roomname = roomNameInput.value.trim();
-        if (roomname.length > 0) {
-          startChat();
-        }
-      });
-
       roomNameInput.addEventListener("input", event => {
         if (event.currentTarget.value.length > 32) {
           event.currentTarget.value = event.currentTarget.value.slice(0, 32);
         }
       });
 
-      roomNameInput.focus();
+      nameInput.focus();
     }
 
     function startEditing(id, rawText) {
@@ -359,16 +342,18 @@
     }
 
     function updatePreview() {
-      let text = chatInput.value;
-      if (text.trim() === "") {
-        previewPane.innerHTML = '<div class="system-text">Live Preview...</div>';
+      let text = chatInput.value.trim();
+      if (text === "") {
+        livePreview.style.display = "none";
+        livePreview.innerHTML = "";
         return;
       }
+      livePreview.style.display = "block";
       let html = window.marked ? window.marked.parse(text) : text;
       html = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
-      previewPane.innerHTML = html;
+      livePreview.innerHTML = "<em>Preview:</em> " + html;
 
-      previewPane.querySelectorAll('p').forEach(pg => {
+      livePreview.querySelectorAll('p').forEach(pg => {
         pg.style.display = 'inline';
         pg.style.margin = '0';
         pg.style.padding = '0';
@@ -387,17 +372,17 @@
         return;
       }
       if (text === "/help") {
-        let helpText = "**Available Commands:**\n" +
-          "`/nick <name>` - Change your nickname\n" +
-          "`/clear` - Clear local chat history (hides previous messages only for you)\n" +
-          "`/shrug` - Append ¯\\_(ツ)_/¯\n" +
-          "`/flip` - Append (╯°□°）╯︵ ┻━┻\n" +
-          "`/roll` - Roll a random number 1-100\n" +
-          "`/me <action>` - Send a third-person action\n" +
-          "`/help` - Show this help message\n\n" +
-          "**Tips:**\n" +
+        let helpText = "**Available Commands:**\n\n" +
+          "- `/nick <name>` : Change your nickname\n" +
+          "- `/clear` : Clear local chat history (hides previous messages only for you)\n" +
+          "- `/shrug` : Append ¯\\_(ツ)_/¯\n" +
+          "- `/flip` : Append (╯°□°）╯︵ ┻━┻\n" +
+          "- `/roll` : Roll a random number 1-100\n" +
+          "- `/me <action>` : Perform an action (e.g. `/me dances` becomes *YourName dances*)\n" +
+          "- `/help` : Show this help message\n\n" +
+          "**Tips:**\n\n" +
           "- Click a user's name to mention them.\n" +
-          "- Press **UP arrow** to edit your last message.\n" +
+          "- Press **UP arrow** in empty input to edit your last message.\n" +
           "- Use **Shift+Enter** to insert a new line.\n" +
           "- Click an image to view it full screen.";
         addChatMessage("System", helpText, Date.now(), null, false, true);
@@ -422,7 +407,7 @@
     }
 
     function startChat() {
-      roomFormContainer.style.display = "none";
+      authFormContainer.style.display = "none";
       chatroom.style.display = "block";
 
       roomname = roomname.replace(/[^a-zA-Z0-9_-]/g, "").replace(/_/g, "-").toLowerCase();
@@ -437,10 +422,10 @@
       chatInput.addEventListener("input", updatePreview);
 
       chatInput.addEventListener("keydown", event => {
-        if (event.keyCode == 13 && !event.shiftKey) { // Enter without Shift
+        if (event.keyCode == 13 && !event.shiftKey) {
           event.preventDefault();
           submitMessage();
-        } else if (event.keyCode == 38 && chatInput.value === "") { // UP arrow
+        } else if (event.keyCode == 38 && chatInput.value === "") {
           let myMsgs = document.querySelectorAll(`.msg-item[data-name="${username}"]`);
           if (myMsgs.length > 0) {
             let lastMsg = myMsgs[myMsgs.length - 1];
@@ -449,7 +434,7 @@
             startEditing(id, rawText);
             event.preventDefault();
           }
-        } else if (event.keyCode == 27 && editingMsgId) { // ESC key
+        } else if (event.keyCode == 27 && editingMsgId) {
           cancelEditing();
           event.preventDefault();
         } else if (event.keyCode == 33) {
@@ -525,15 +510,44 @@
     let pingInterval = null;
 
     function notifyVisibility() {
+      let isVisible = document.visibilityState === 'visible';
       if (isUsingSW && navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({
           type: 'VISIBILITY',
           room: roomname,
-          visible: document.visibilityState === 'visible'
+          visible: isVisible
         });
+      } else if (currentWebSocket && currentWebSocket.readyState === 1) {
+        currentWebSocket.send(JSON.stringify({ status: isVisible ? 'active' : 'background' }));
       }
     }
     document.addEventListener('visibilitychange', notifyVisibility);
+
+    function updateRosterView(rosterArray) {
+      rosterUsers.innerHTML = "";
+      rosterArray.forEach(user => {
+        let p = document.createElement("div");
+        p.className = "roster-user";
+        p.id = "roster-user-" + user.name;
+
+        let icon = user.status === 'background' ? "🌙" : "🟢";
+        let color = user.status === 'background' ? "#888" : "#000";
+
+        p.style.color = color;
+        p.innerText = `${icon} ${user.name}`;
+        rosterUsers.appendChild(p);
+      });
+    }
+
+    function updateSingleRosterUser(name, status) {
+      let p = document.getElementById("roster-user-" + name);
+      if (p) {
+        let icon = status === 'background' ? "🌙" : "🟢";
+        let color = status === 'background' ? "#888" : "#000";
+        p.style.color = color;
+        p.innerText = `${icon} ${name}`;
+      }
+    }
 
     async function join() {
       if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
@@ -564,8 +578,9 @@
 
           await navigator.serviceWorker.ready;
 
+          let isVisible = document.visibilityState === 'visible';
           const connectPayload = {
-            type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: true
+            type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: true, status: isVisible ? 'active' : 'background'
           };
 
           if (navigator.serviceWorker.controller) {
@@ -580,7 +595,7 @@
           pingInterval = setInterval(() => {
             if (navigator.serviceWorker.controller) {
               navigator.serviceWorker.controller.postMessage({
-                type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: false
+                type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: false, status: document.visibilityState === 'visible' ? 'active' : 'background'
               });
             }
           }, 5000);
@@ -602,15 +617,15 @@
       let startTime = Date.now();
 
       let rejoin = async () => {
-        if (!rejoined) {
+        if (!rejoined && !stopReconnect) {
           rejoined = true;
           currentWebSocket = null;
 
           while (rosterUsers.firstChild) rosterUsers.removeChild(rosterUsers.firstChild);
 
           let timeSinceLastJoin = Date.now() - startTime;
-          if (timeSinceLastJoin < 10000) {
-            await new Promise(resolve => setTimeout(resolve, 10000 - timeSinceLastJoin));
+          if (timeSinceLastJoin < 5000) {
+            await new Promise(resolve => setTimeout(resolve, 5000 - timeSinceLastJoin));
           }
           fallbackJoin();
         }
@@ -619,7 +634,8 @@
       ws.addEventListener("open", event => {
         currentWebSocket = ws;
         addChatMessage("System", "Connected successfully.", Date.now(), null, false, true);
-        ws.send(JSON.stringify({ name: username, password: password }));
+        let isVisible = document.visibilityState === 'visible';
+        ws.send(JSON.stringify({ name: username, password: password, status: isVisible ? 'active' : 'background' }));
 
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
@@ -632,13 +648,17 @@
       });
 
       ws.addEventListener("close", event => {
-        addChatMessage("System", "Disconnected. Reconnecting...", Date.now(), null, false, true);
-        if (pingInterval) clearInterval(pingInterval);
-        rejoin();
+        if (!stopReconnect) {
+          addChatMessage("System", "Disconnected. Reconnecting...", Date.now(), null, false, true);
+          if (pingInterval) clearInterval(pingInterval);
+          rejoin();
+        }
       });
       ws.addEventListener("error", event => {
-        if (pingInterval) clearInterval(pingInterval);
-        rejoin();
+        if (!stopReconnect) {
+          if (pingInterval) clearInterval(pingInterval);
+          rejoin();
+        }
       });
     }
 
@@ -649,21 +669,25 @@
 
       if (data.error) {
         addChatMessage("System", "* Error: " + data.error, Date.now(), null, false, true);
-        if (data.error === "Nickname already in use.") {
-          setTimeout(() => location.reload(), 2000);
+        if (data.error.includes("password") || data.error.includes("Nickname") || data.error.includes("nickname")) {
+          stopReconnect = true;
+          alert(data.error);
+          setTimeout(() => location.reload(), 1000);
         }
       } else if (data.roster) {
-        rosterUsers.innerHTML = "";
-        data.roster.forEach(name => {
-          let p = document.createElement("p");
-          p.innerText = name;
-          rosterUsers.appendChild(p);
-        });
+        updateRosterView(data.roster);
+      } else if (data.statusUpdate) {
+        updateSingleRosterUser(data.statusUpdate.name, data.statusUpdate.status);
       } else if (data.joined) {
-        let exists = Array.from(rosterUsers.childNodes).some(c => c.innerText === data.joined);
+        let exists = document.getElementById("roster-user-" + data.joined);
         if (!exists) {
-          let p = document.createElement("p");
-          p.innerText = data.joined;
+          let p = document.createElement("div");
+          p.className = "roster-user";
+          p.id = "roster-user-" + data.joined;
+          let icon = data.status === 'background' ? "🌙" : "🟢";
+          let color = data.status === 'background' ? "#888" : "#000";
+          p.style.color = color;
+          p.innerText = `${icon} ${data.joined}`;
           rosterUsers.appendChild(p);
         }
         if (data.timestamp >= clearedAt) {
@@ -673,19 +697,15 @@
         if (data.timestamp >= clearedAt) {
           addChatMessage("System", `**${data.nameChange.old === username ? "You are" : data.nameChange.old}** is now known as **${data.nameChange.new}**.`, data.timestamp, null, false, true);
         }
-        for (let child of rosterUsers.childNodes) {
-          if (child.innerText == data.nameChange.old) {
-            child.innerText = data.nameChange.new;
-            break;
-          }
+        let oldEl = document.getElementById("roster-user-" + data.nameChange.old);
+        if (oldEl) {
+          oldEl.id = "roster-user-" + data.nameChange.new;
+          oldEl.innerText = oldEl.innerText.replace(data.nameChange.old, data.nameChange.new);
         }
       } else if (data.quit) {
-        for (let child of rosterUsers.childNodes) {
-          if (child.innerText == data.quit) {
-            rosterUsers.removeChild(child);
-            break;
-          }
-        }
+        let el = document.getElementById("roster-user-" + data.quit);
+        if (el) el.remove();
+
         if (data.timestamp >= clearedAt) {
           addChatMessage("System", `**${data.quit}** left the room.`, data.timestamp, null, false, true);
         }
@@ -713,9 +733,14 @@
         let msgDiv = document.getElementById("msg_" + data.deleted);
         if (msgDiv) msgDiv.remove();
       } else {
+        // Normal chat message
         if (data.timestamp >= clearedAt && data.timestamp > lastSeenTimestamp) {
           addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
           lastSeenTimestamp = data.timestamp;
+
+          if (!isUsingSW && document.hidden && Notification.permission === "granted" && data.name !== username) {
+            new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: "New message received" });
+          }
         }
       }
     }
@@ -875,7 +900,7 @@
       }
     }
 
-    startNameChooser();
+    startAuthForm();
   </script>
 </body>
 

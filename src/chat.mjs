@@ -1,31 +1,28 @@
-// This is the Chat Demo Worker, built using Durable Objects!
-
 import HTML from "./chat.html";
 
 // =======================================================================================
-// Service Worker Code injected to keep background connection active
+// Service Worker Code
 const SW_CODE = `
 const wsMap = new Map();
 const queueMap = new Map();
 const pingMap = new Map();
 const visibilityMap = new Map();
 
-function getOrCreateWs(room, user, pass, host, proto) {
+function getOrCreateWs(room, user, pass, host, proto, initialStatus) {
     if (wsMap.has(room)) {
         let ws = wsMap.get(room);
         if (ws.readyState === 0 || ws.readyState === 1) return ws;
     }
 
-    console.log("[SW] Creating new WebSocket connection to room:", room);
     const wssUrl = proto + '//' + host + '/api/room/' + room + '/websocket';
     const ws = new WebSocket(wssUrl);
     wsMap.set(room, ws);
+    ws._stopReconnect = false;
     
     if (!queueMap.has(room)) queueMap.set(room, []);
 
     ws.onopen = async () => {
-        console.log("[SW] WebSocket opened for room:", room);
-        ws.send(JSON.stringify({name: user, password: pass}));
+        ws.send(JSON.stringify({name: user, password: pass, status: initialStatus || 'background'}));
         
         const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
         clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'CONNECTED'}));
@@ -39,9 +36,14 @@ function getOrCreateWs(room, user, pass, host, proto) {
     ws.onmessage = async (event) => {
         if (event.data === "pong") return;
         const data = JSON.parse(event.data);
+
+        if (data.error) {
+            if (data.error.includes("password") || data.error.includes("nickname") || data.error.includes("Invalid")) {
+                ws._stopReconnect = true;
+            }
+        }
         
         if (data.ready) {
-            console.log("[SW] Room ready, flushing queue for room:", room);
             ws._isReady = true;
             let queue = queueMap.get(room);
             while(queue && queue.length > 0) {
@@ -54,11 +56,8 @@ function getOrCreateWs(room, user, pass, host, proto) {
             client.postMessage({type: 'WS_MSG', room: room, data: event.data});
         });
 
-        // Push aggregation notification if the user's tab is explicitly hidden/unfocused
         let isVisible = visibilityMap.get(room) === true;
         if (!isVisible && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
-            console.log("[SW] Tab is hidden. Emitting aggregated notification for:", room);
-            
             const notifications = await self.registration.getNotifications({ tag: room });
             let count = 1;
             if (notifications.length > 0) {
@@ -67,7 +66,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
             }
             
             self.registration.showNotification('New Messages', {
-                body: \`You have \${count} new messages in #\${room} while away.\`,
+                body: \`You have \${count} unread messages in #\${room}\`,
                 icon: '/favicon.ico',
                 tag: room,
                 renotify: true,
@@ -77,7 +76,6 @@ function getOrCreateWs(room, user, pass, host, proto) {
     };
 
     ws.onclose = async () => {
-        console.log("[SW] WebSocket closed for room:", room);
         ws._isReady = false;
         if (pingMap.has(room)) {
             clearInterval(pingMap.get(room));
@@ -88,15 +86,14 @@ function getOrCreateWs(room, user, pass, host, proto) {
         const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
         clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'DISCONNECTED'}));
 
-        // Attempt background reconnect
-        setTimeout(() => {
-            console.log("[SW] Attempting background reconnect to room:", room);
-            getOrCreateWs(room, user, pass, host, proto);
-        }, 5000);
+        if (!ws._stopReconnect) {
+            setTimeout(() => {
+                getOrCreateWs(room, user, pass, host, proto, 'background');
+            }, 5000);
+        }
     };
 
     ws.onerror = (err) => {
-        console.log("[SW] WebSocket error:", err);
         ws._isReady = false;
     };
 
@@ -104,12 +101,10 @@ function getOrCreateWs(room, user, pass, host, proto) {
 }
 
 self.addEventListener('install', event => {
-    console.log("[SW] Installing new Service Worker version.");
     event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', event => {
-    console.log("[SW] Activating new Service Worker version.");
     event.waitUntil(self.clients.claim());
 });
 
@@ -119,15 +114,18 @@ self.addEventListener('message', event => {
 
     if (d.type === 'VISIBILITY') {
         visibilityMap.set(d.room, d.visible);
+        const ws = wsMap.get(d.room);
+        if (ws && ws.readyState === 1 && ws._isReady) {
+            ws.send(JSON.stringify({status: d.visible ? 'active' : 'background'}));
+        }
     } else if (d.type === 'CONNECT') {
-        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto, d.status);
         if (ws.readyState === 1 && ws._isReady && d.requestHistory) {
             ws.send(JSON.stringify({requestHistory: true}));
         }
     } else if (d.type === 'WS_SEND') {
-        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
+        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto, 'active');
         if (ws.readyState !== 1 || !ws._isReady) {
-            console.log("[SW] Queuing message, WS not ready");
             queueMap.get(d.room).push(d.data);
         } else {
             ws.send(d.data);
@@ -143,7 +141,9 @@ self.addEventListener('notificationclick', event => {
     event.waitUntil(
         self.clients.matchAll({type: 'window'}).then(clients => {
             for (let client of clients) {
-                if (client.url.includes('#' + d.room) && 'focus' in client) return client.focus();
+                if (client.url.includes('#' + d.room) && 'focus' in client) {
+                    return client.focus();
+                }
             }
             if (self.clients.openWindow) return self.clients.openWindow('/#' + d.room);
         })
@@ -299,7 +299,6 @@ export class ChatRoom {
       let now = Date.now();
 
       for (let [key, value] of history) {
-        // Delete messages older than 24 hours
         if (now - value.timestamp > this.ONE_DAY_MS) {
           this.storage.delete(key);
         } else {
@@ -371,7 +370,7 @@ export class ChatRoom {
   async handleSession(webSocket, ip) {
     this.state.acceptWebSocket(webSocket);
 
-    let session = { lastActive: Date.now() };
+    let session = { lastActive: Date.now(), status: 'active' };
     webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
     this.sessions.set(webSocket, session);
 
@@ -398,10 +397,25 @@ export class ChatRoom {
 
       let data = JSON.parse(msg);
 
+      if (data.status && (!data.name && !data.message && !data.requestHistory)) {
+        if (session.status !== data.status) {
+          session.status = data.status;
+          webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), status: session.status });
+          this.broadcast({ statusUpdate: { name: session.name, status: session.status } });
+        }
+        return;
+      }
+
       if (!session.name) {
         if (!data.name) {
           webSocket.send(JSON.stringify({ error: "Name required." }));
           webSocket.close(1008, "Name required.");
+          return;
+        }
+
+        if (!data.name.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
+          webSocket.send(JSON.stringify({ error: "Invalid nickname. Only letters, numbers, hyphens, and underscores are allowed." }));
+          webSocket.close(1008, "Invalid nickname.");
           return;
         }
 
@@ -428,21 +442,16 @@ export class ChatRoom {
         }
 
         session.name = "" + data.name;
-        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
-
-        if (session.name.length > 32) {
-          webSocket.send(JSON.stringify({ error: "Name too long." }));
-          webSocket.close(1009, "Name too long.");
-          return;
-        }
+        session.status = data.status || 'active';
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name, status: session.status });
 
         let users = [];
-        this.sessions.forEach(s => { if (s.name) users.push(s.name); });
+        this.sessions.forEach(s => { if (s.name) users.push({ name: s.name, status: s.status || 'active' }); });
         webSocket.send(JSON.stringify({ roster: users }));
 
         webSocket.send(JSON.stringify({ history: this.messages }));
 
-        this.broadcast({ joined: session.name, timestamp: Date.now() });
+        this.broadcast({ joined: session.name, status: session.status, timestamp: Date.now() });
         webSocket.send(JSON.stringify({ ready: true }));
         return;
       }
@@ -455,6 +464,11 @@ export class ChatRoom {
       if (data.message !== undefined && data.message.startsWith("/nick ")) {
         let newName = data.message.substring(6).trim();
         if (newName.length > 0 && newName.length <= 32) {
+          if (!newName.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
+            webSocket.send(JSON.stringify({ error: "Invalid nickname." }));
+            return;
+          }
+
           let nameTaken = false;
           this.sessions.forEach(s => {
             if (s.name === newName) nameTaken = true;
@@ -510,7 +524,6 @@ export class ChatRoom {
 
         this.messages.push(msgObj);
 
-        // Maintain history threshold & 24h cleanup
         let cutoff = Date.now() - this.ONE_DAY_MS;
         while (this.messages.length > 0 && (this.messages.length > 1000 || this.messages[0].timestamp < cutoff)) {
           let removed = this.messages.shift();
