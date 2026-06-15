@@ -20,6 +20,4 @@ new_sqlite_classes = ["ChatRoom"]
 
 [vars]
 GithubOwner = "langningchen"
-GithubRepo = "workers-chat"
-GithubPAT = "dummy"
-
+GithubRepo = "image-data"

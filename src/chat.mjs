@@ -1,9 +1,9 @@
-// This is the Edge Chat Demo Worker, built using Durable Objects!
+// This is the Chat Demo Worker, built using Durable Objects!
 
 import HTML from "./chat.html";
 
 // =======================================================================================
-// Service Worker 代码，用于提供即使页面关闭时的后台连接保持与消息弹出通知 / 快捷回复能力
+// Service Worker Code injected to keep background connection active
 const SW_CODE = `
 const wsMap = new Map();
 const queueMap = new Map();
@@ -15,6 +15,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
         if (ws.readyState === 0 || ws.readyState === 1) return ws;
     }
 
+    console.log("[SW] Creating new WebSocket connection to room:", room);
     const wssUrl = proto + '//' + host + '/api/room/' + room + '/websocket';
     const ws = new WebSocket(wssUrl);
     wsMap.set(room, ws);
@@ -22,6 +23,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
     if (!queueMap.has(room)) queueMap.set(room, []);
 
     ws.onopen = () => {
+        console.log("[SW] WebSocket opened for room:", room);
         ws.send(JSON.stringify({name: user, password: pass}));
         if (pingMap.has(room)) clearInterval(pingMap.get(room));
         pingMap.set(room, setInterval(() => {
@@ -34,6 +36,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
         const data = JSON.parse(event.data);
         
         if (data.ready) {
+            console.log("[SW] Room ready, flushing queue for room:", room);
             ws._isReady = true;
             let queue = queueMap.get(room);
             while(queue && queue.length > 0) {
@@ -50,8 +53,9 @@ function getOrCreateWs(room, user, pass, host, proto) {
             }
         });
 
-        // 页面不在前台展示时推送通知，忽略系统消息
+        // Push notification if the page is not visible and it's a real chat message
         if (!hasVisibleClient && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
+            console.log("[SW] Emitting notification from:", data.name);
             self.registration.showNotification(data.name + ' in #' + room, {
                 body: data.message,
                 icon: '/favicon.ico',
@@ -66,6 +70,7 @@ function getOrCreateWs(room, user, pass, host, proto) {
     };
 
     ws.onclose = () => {
+        console.log("[SW] WebSocket closed for room:", room);
         ws._isReady = false;
         if (pingMap.has(room)) {
             clearInterval(pingMap.get(room));
@@ -73,21 +78,30 @@ function getOrCreateWs(room, user, pass, host, proto) {
         }
         wsMap.delete(room);
         
-        // 当断开时，尝试在后台自发重连，尽量保活 SW WebSocket
+        // Attempt background reconnect
         setTimeout(() => {
+            console.log("[SW] Attempting background reconnect to room:", room);
             getOrCreateWs(room, user, pass, host, proto);
         }, 5000);
     };
 
-    ws.onerror = () => {
+    ws.onerror = (err) => {
+        console.log("[SW] WebSocket error:", err);
         ws._isReady = false;
     };
 
     return ws;
 }
 
-self.addEventListener('install', event => self.skipWaiting());
-self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+self.addEventListener('install', event => {
+    console.log("[SW] Installing new Service Worker version.");
+    event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener('activate', event => {
+    console.log("[SW] Activating new Service Worker version.");
+    event.waitUntil(self.clients.claim());
+});
 
 self.addEventListener('message', event => {
     const d = event.data;
@@ -101,6 +115,7 @@ self.addEventListener('message', event => {
     } else if (d.type === 'WS_SEND') {
         const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
         if (ws.readyState !== 1 || !ws._isReady) {
+            console.log("[SW] Queuing message, WS not ready");
             queueMap.get(d.room).push(d.data);
         } else {
             ws.send(d.data);
@@ -116,7 +131,7 @@ self.addEventListener('notificationclick', event => {
     if (event.action === 'reply') {
         const replyText = event.reply;
         if (replyText) {
-            // 使用 event.waitUntil 包装 Promise，确保发送完成前浏览器不会中止 SW 进程
+            // Force browser to wait until background send completes
             event.waitUntil(new Promise((resolve) => {
                 const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
                 const msgStr = JSON.stringify({message: replyText});
@@ -128,14 +143,13 @@ self.addEventListener('notificationclick', event => {
                     if (!queueMap.has(d.room)) queueMap.set(d.room, []);
                     queueMap.get(d.room).push(msgStr);
                     
-                    // 轮询等待连接就绪后队列被消费
                     let attempts = 0;
                     let check = setInterval(() => {
                         attempts++;
                         if (ws.readyState === 1 && ws._isReady) {
                             clearInterval(check);
-                            setTimeout(resolve, 500); // 给时间让队列发出
-                        } else if (ws.readyState === 3 || attempts > 20) { // 超过10秒放弃
+                            setTimeout(resolve, 500); 
+                        } else if (ws.readyState === 3 || attempts > 20) { 
                             clearInterval(check);
                             resolve();
                         }
@@ -203,7 +217,7 @@ export default {
               headers: {
                 'Authorization': 'Bearer ' + env.GithubPAT,
                 'Content-Type': 'application/json',
-                'User-Agent': 'langningchen-image',
+                'User-Agent': 'chat-image-uploader',
               },
               body: JSON.stringify({
                 message: `Upload from ${request.headers.get('CF-Connecting-IP')}`,
@@ -228,7 +242,7 @@ export default {
               headers: {
                 'Authorization': 'Bearer ' + env.GithubPAT,
                 'Accept': 'application/vnd.github.v3.raw',
-                'User-Agent': 'langningchen-image',
+                'User-Agent': 'chat-image-uploader',
               },
             }).then(async (res) => {
               if (!res.ok) return new Response('Image not found', { status: 404 });
@@ -270,13 +284,11 @@ async function handleApiRequest(path, request, env) {
       }
 
       let roomObject = env.rooms.get(id);
-
       let newUrl = new URL(request.url);
       newUrl.pathname = "/" + path.slice(2).join("/");
 
       return roomObject.fetch(newUrl, request);
     }
-
     default:
       return new Response("Not found", { status: 404 });
   }
@@ -293,23 +305,30 @@ export class ChatRoom {
     this.messages = [];
     this.messageCounter = 0;
 
+    this.THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
     this.state.blockConcurrencyWhile(async () => {
       let storedPassword = await this.storage.get("roomPassword");
       if (storedPassword !== undefined) {
         this.roomPassword = storedPassword;
       }
 
-      // Load messages history
       let history = await this.storage.list({ prefix: "msg_", limit: 1000, reverse: true });
       let msgs = [];
+      let now = Date.now();
+
       for (let [key, value] of history) {
-        msgs.push(value);
-        let idNum = parseInt(key.split("_")[1]);
-        if (idNum > this.messageCounter) {
-          this.messageCounter = idNum;
+        // Delete messages older than 3 days
+        if (now - value.timestamp > this.THREE_DAYS_MS) {
+          this.storage.delete(key);
+        } else {
+          msgs.push(value);
+          let idNum = parseInt(key.split("_")[1]);
+          if (idNum > this.messageCounter) {
+            this.messageCounter = idNum;
+          }
         }
       }
-      // sort by timestamp ascending
       msgs.sort((a, b) => a.timestamp - b.timestamp);
       this.messages = msgs;
     });
@@ -338,7 +357,6 @@ export class ChatRoom {
     }
     let now = Date.now();
     this.sessions.forEach((session, ws) => {
-      // Kick offline if no message/ping received for 10s
       if (now - session.lastActive > 10000) {
         ws.close(1011, "Ping timeout");
         this.closeOrErrorHandler(ws);
@@ -363,7 +381,6 @@ export class ChatRoom {
 
           return new Response(null, { status: 101, webSocket: pair[0] });
         }
-
         default:
           return new Response("Not found", { status: 404 });
       }
@@ -390,7 +407,6 @@ export class ChatRoom {
         return;
       }
 
-      // Update last active time for timeout tracking
       session.lastActive = Date.now();
       webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
 
@@ -405,6 +421,17 @@ export class ChatRoom {
         if (!data.name) {
           webSocket.send(JSON.stringify({ error: "Name required." }));
           webSocket.close(1008, "Name required.");
+          return;
+        }
+
+        let nameTaken = false;
+        this.sessions.forEach(s => {
+          if (s.name === data.name) nameTaken = true;
+        });
+
+        if (nameTaken) {
+          webSocket.send(JSON.stringify({ error: "Nickname already in use." }));
+          webSocket.close(1008, "Nickname already in use.");
           return;
         }
 
@@ -428,15 +455,12 @@ export class ChatRoom {
           return;
         }
 
-        // Send Current Roster ONLY to the newly joined user
         let users = [];
         this.sessions.forEach(s => { if (s.name) users.push(s.name); });
         webSocket.send(JSON.stringify({ roster: users }));
 
-        // Send history upon join
         webSocket.send(JSON.stringify({ history: this.messages }));
 
-        // Broadcast join to ALL users (including sender so UI catches it as System notification)
         this.broadcast({ joined: session.name, timestamp: Date.now() });
         webSocket.send(JSON.stringify({ ready: true }));
         return;
@@ -447,10 +471,19 @@ export class ChatRoom {
         return;
       }
 
-      // Handle name change
       if (data.message !== undefined && data.message.startsWith("/nick ")) {
         let newName = data.message.substring(6).trim();
         if (newName.length > 0 && newName.length <= 32) {
+          let nameTaken = false;
+          this.sessions.forEach(s => {
+            if (s.name === newName) nameTaken = true;
+          });
+
+          if (nameTaken) {
+            webSocket.send(JSON.stringify({ error: "Nickname already in use." }));
+            return;
+          }
+
           let oldName = session.name;
           session.name = newName;
           webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
@@ -459,7 +492,6 @@ export class ChatRoom {
         return;
       }
 
-      // Handle Edit Message
       if (data.edit) {
         let msgId = data.edit;
         let newText = data.text;
@@ -474,7 +506,6 @@ export class ChatRoom {
         return;
       }
 
-      // Handle Delete Message
       if (data.delete) {
         let msgId = data.delete;
 
@@ -496,14 +527,16 @@ export class ChatRoom {
         this.messageCounter++;
         msgObj.id = this.messageCounter.toString();
 
-        // Save and maintain history threshold
         this.messages.push(msgObj);
-        if (this.messages.length > 1000) {
+
+        // Maintain history threshold & 3-day cleanup
+        let cutoff = Date.now() - this.THREE_DAYS_MS;
+        while (this.messages.length > 0 && (this.messages.length > 1000 || this.messages[0].timestamp < cutoff)) {
           let removed = this.messages.shift();
           this.storage.delete("msg_" + removed.id.padStart(10, "0"));
         }
-        this.storage.put("msg_" + msgObj.id.padStart(10, "0"), msgObj);
 
+        this.storage.put("msg_" + msgObj.id.padStart(10, "0"), msgObj);
         this.broadcast(msgObj);
       }
     } catch (err) {
