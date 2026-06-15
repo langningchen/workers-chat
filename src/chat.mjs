@@ -8,6 +8,7 @@ const SW_CODE = `
 const wsMap = new Map();
 const queueMap = new Map();
 const pingMap = new Map();
+const visibilityMap = new Map();
 
 function getOrCreateWs(room, user, pass, host, proto) {
     if (wsMap.has(room)) {
@@ -22,9 +23,13 @@ function getOrCreateWs(room, user, pass, host, proto) {
     
     if (!queueMap.has(room)) queueMap.set(room, []);
 
-    ws.onopen = () => {
+    ws.onopen = async () => {
         console.log("[SW] WebSocket opened for room:", room);
         ws.send(JSON.stringify({name: user, password: pass}));
+        
+        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
+        clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'CONNECTED'}));
+        
         if (pingMap.has(room)) clearInterval(pingMap.get(room));
         pingMap.set(room, setInterval(() => {
             if (ws.readyState === 1) ws.send("ping");
@@ -45,31 +50,33 @@ function getOrCreateWs(room, user, pass, host, proto) {
         }
 
         const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
-        let hasVisibleClient = false;
         clients.forEach(client => {
             client.postMessage({type: 'WS_MSG', room: room, data: event.data});
-            if (client.visibilityState === 'visible' && client.url.includes('#' + room)) {
-                hasVisibleClient = true;
-            }
         });
 
-        // Push notification if the page is not visible and it's a real chat message
-        if (!hasVisibleClient && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
-            console.log("[SW] Emitting notification from:", data.name);
-            self.registration.showNotification(data.name + ' in #' + room, {
-                body: data.message,
+        // Push aggregation notification if the user's tab is explicitly hidden/unfocused
+        let isVisible = visibilityMap.get(room) === true;
+        if (!isVisible && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
+            console.log("[SW] Tab is hidden. Emitting aggregated notification for:", room);
+            
+            const notifications = await self.registration.getNotifications({ tag: room });
+            let count = 1;
+            if (notifications.length > 0) {
+                const oldData = notifications[0].data;
+                count = (oldData && oldData.count ? oldData.count : 0) + 1;
+            }
+            
+            self.registration.showNotification('New Messages', {
+                body: \`You have \${count} new messages in #\${room} while away.\`,
                 icon: '/favicon.ico',
                 tag: room,
                 renotify: true,
-                data: { room, user, pass, host, proto },
-                actions: [
-                    {action: 'reply', title: 'Reply', type: 'text'}
-                ]
+                data: { room, count }
             });
         }
     };
 
-    ws.onclose = () => {
+    ws.onclose = async () => {
         console.log("[SW] WebSocket closed for room:", room);
         ws._isReady = false;
         if (pingMap.has(room)) {
@@ -78,6 +85,9 @@ function getOrCreateWs(room, user, pass, host, proto) {
         }
         wsMap.delete(room);
         
+        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
+        clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'DISCONNECTED'}));
+
         // Attempt background reconnect
         setTimeout(() => {
             console.log("[SW] Attempting background reconnect to room:", room);
@@ -107,7 +117,9 @@ self.addEventListener('message', event => {
     const d = event.data;
     if (!d || !d.room) return;
 
-    if (d.type === 'CONNECT') {
+    if (d.type === 'VISIBILITY') {
+        visibilityMap.set(d.room, d.visible);
+    } else if (d.type === 'CONNECT') {
         const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
         if (ws.readyState === 1 && ws._isReady && d.requestHistory) {
             ws.send(JSON.stringify({requestHistory: true}));
@@ -128,45 +140,14 @@ self.addEventListener('notificationclick', event => {
     const d = event.notification.data;
     if (!d || !d.room) return;
 
-    if (event.action === 'reply') {
-        const replyText = event.reply;
-        if (replyText) {
-            // Force browser to wait until background send completes
-            event.waitUntil(new Promise((resolve) => {
-                const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto);
-                const msgStr = JSON.stringify({message: replyText});
-                
-                if (ws.readyState === 1 && ws._isReady) {
-                    ws.send(msgStr);
-                    resolve();
-                } else {
-                    if (!queueMap.has(d.room)) queueMap.set(d.room, []);
-                    queueMap.get(d.room).push(msgStr);
-                    
-                    let attempts = 0;
-                    let check = setInterval(() => {
-                        attempts++;
-                        if (ws.readyState === 1 && ws._isReady) {
-                            clearInterval(check);
-                            setTimeout(resolve, 500); 
-                        } else if (ws.readyState === 3 || attempts > 20) { 
-                            clearInterval(check);
-                            resolve();
-                        }
-                    }, 500);
-                }
-            }));
-        }
-    } else {
-        event.waitUntil(
-            self.clients.matchAll({type: 'window'}).then(clients => {
-                for (let client of clients) {
-                    if (client.url.includes('#' + d.room) && 'focus' in client) return client.focus();
-                }
-                if (self.clients.openWindow) return self.clients.openWindow('/#' + d.room);
-            })
-        );
-    }
+    event.waitUntil(
+        self.clients.matchAll({type: 'window'}).then(clients => {
+            for (let client of clients) {
+                if (client.url.includes('#' + d.room) && 'focus' in client) return client.focus();
+            }
+            if (self.clients.openWindow) return self.clients.openWindow('/#' + d.room);
+        })
+    );
 });
 `;
 
@@ -305,7 +286,7 @@ export class ChatRoom {
     this.messages = [];
     this.messageCounter = 0;
 
-    this.THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+    this.ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
     this.state.blockConcurrencyWhile(async () => {
       let storedPassword = await this.storage.get("roomPassword");
@@ -318,8 +299,8 @@ export class ChatRoom {
       let now = Date.now();
 
       for (let [key, value] of history) {
-        // Delete messages older than 3 days
-        if (now - value.timestamp > this.THREE_DAYS_MS) {
+        // Delete messages older than 24 hours
+        if (now - value.timestamp > this.ONE_DAY_MS) {
           this.storage.delete(key);
         } else {
           msgs.push(value);
@@ -529,8 +510,8 @@ export class ChatRoom {
 
         this.messages.push(msgObj);
 
-        // Maintain history threshold & 3-day cleanup
-        let cutoff = Date.now() - this.THREE_DAYS_MS;
+        // Maintain history threshold & 24h cleanup
+        let cutoff = Date.now() - this.ONE_DAY_MS;
         while (this.messages.length > 0 && (this.messages.length > 1000 || this.messages[0].timestamp < cutoff)) {
           let removed = this.messages.shift();
           this.storage.delete("msg_" + removed.id.padStart(10, "0"));
