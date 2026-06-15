@@ -2,6 +2,12 @@
   "name": "edge-chat-demo",
   "description": "An edge chat service that runs on Cloudflare Workers using Durable Objects",
   "version": "1.0.0",
-  "module": "./src/chat.mjs",
-  "private": true
+  "main": "./src/chat.mjs",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4.100.0"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy"
+  }
 }

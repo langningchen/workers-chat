@@ -249,7 +249,7 @@
 
 <body>
   <div id="auth-form-container" class="center-form-container">
-    <h2>Join Edge Chat</h2>
+    <h2>Join Chat</h2>
     <form id="auth-form" style="display:flex; flex-direction:column; align-items:center;">
       <input id="name-input" placeholder="Nickname" required pattern="[A-Za-z0-9\-_]+"
         title="Only letters, numbers, hyphens, and underscores allowed." autocomplete="username">
@@ -284,7 +284,6 @@
 
   <script type="text/javascript">
     let currentWebSocket = null;
-    let isUsingSW = false;
     let stopReconnect = false;
 
     let authFormContainer = document.querySelector("#auth-form-container");
@@ -364,7 +363,9 @@
       if (isAtBottom && document.visibilityState === 'visible') {
         if (highestMessageId > lastReadMessageId) {
           lastReadMessageId = highestMessageId;
-          sendWsMessage({ readCursor: lastReadMessageId });
+          if (currentWebSocket && currentWebSocket.readyState === 1) {
+            currentWebSocket.send(JSON.stringify({ readCursor: lastReadMessageId }));
+          }
         }
         unreadAlert.style.display = "none";
       }
@@ -436,10 +437,10 @@
       }
 
       if (editingMsgId) {
-        sendWsMessage({ edit: editingMsgId, text: text });
+        if (currentWebSocket) currentWebSocket.send(JSON.stringify({ edit: editingMsgId, text: text }));
         cancelEditing();
       } else {
-        sendWsMessage({ message: text });
+        if (currentWebSocket) currentWebSocket.send(JSON.stringify({ message: text }));
         chatInput.value = "";
         updatePreview();
       }
@@ -521,32 +522,12 @@
       join();
     }
 
-    function sendWsMessage(msgObj) {
-      let msgStr = JSON.stringify(msgObj);
-      if (isUsingSW) {
-        navigator.serviceWorker.ready.then(reg => {
-          if (reg.active) {
-            reg.active.postMessage({
-              type: 'WS_SEND', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, data: msgStr
-            });
-          }
-        });
-      } else if (currentWebSocket) {
-        currentWebSocket.send(msgStr);
-      }
-    }
-
     let pingInterval = null;
 
     function notifyVisibility() {
       let isVisible = document.visibilityState === 'visible';
       updateReadCursor();
-
-      if (isUsingSW && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({
-          type: 'VISIBILITY', room: roomname, visible: isVisible
-        });
-      } else if (currentWebSocket && currentWebSocket.readyState === 1) {
+      if (currentWebSocket && currentWebSocket.readyState === 1) {
         currentWebSocket.send(JSON.stringify({ status: isVisible ? 'active' : 'background' }));
       }
     }
@@ -583,67 +564,12 @@
         await Notification.requestPermission();
       }
 
-      addChatMessage("System", "Connecting to server...", Date.now(), null, false, true);
-
-      if ('serviceWorker' in navigator) {
-        try {
-          const reg = await navigator.serviceWorker.register('/sw.js');
-          reg.update();
-
-          navigator.serviceWorker.addEventListener('message', event => {
-            if (event.data && event.data.room === roomname) {
-              if (event.data.type === 'WS_MSG') {
-                handleWsMessage(event.data.data);
-              } else if (event.data.type === 'WS_STATUS') {
-                if (event.data.status === 'CONNECTED') {
-                  addChatMessage("System", "Connected successfully.", Date.now(), null, false, true);
-                  notifyVisibility();
-                } else if (event.data.status === 'DISCONNECTED') {
-                  addChatMessage("System", "Disconnected. Reconnecting...", Date.now(), null, false, true);
-                }
-              }
-            }
-          });
-
-          await navigator.serviceWorker.ready;
-
-          let isVisible = document.visibilityState === 'visible';
-          const connectPayload = {
-            type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: true, status: isVisible ? 'active' : 'background'
-          };
-
-          if (navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage(connectPayload);
-          } else {
-            reg.active.postMessage(connectPayload);
-          }
-
-          isUsingSW = true;
-
-          if (pingInterval) clearInterval(pingInterval);
-          pingInterval = setInterval(() => {
-            if (navigator.serviceWorker.controller) {
-              navigator.serviceWorker.controller.postMessage({
-                type: 'CONNECT', room: roomname, user: username, pass: password || '', host: hostname, proto: proto, requestHistory: false, status: document.visibilityState === 'visible' ? 'active' : 'background'
-              });
-            }
-          }, 5000);
-
-          return;
-        } catch (e) {
-          console.error("SW fallback:", e);
-        }
-      }
-
-      fallbackJoin();
-    }
-
-    function fallbackJoin() {
-      isUsingSW = false;
       const wss = proto === "ws:" ? "ws://" : "wss://";
       let ws = new WebSocket(wss + hostname + "/api/room/" + roomname + "/websocket");
       let rejoined = false;
       let startTime = Date.now();
+
+      addChatMessage("System", "Connecting to server...", Date.now(), null, false, true);
 
       let rejoin = async () => {
         if (!rejoined && !stopReconnect) {
@@ -655,15 +581,20 @@
           if (timeSinceLastJoin < 5000) {
             await new Promise(resolve => setTimeout(resolve, 5000 - timeSinceLastJoin));
           }
-          fallbackJoin();
+          join();
         }
       }
 
       ws.addEventListener("open", event => {
         currentWebSocket = ws;
         addChatMessage("System", "Connected successfully.", Date.now(), null, false, true);
+
         let isVisible = document.visibilityState === 'visible';
-        ws.send(JSON.stringify({ name: username, password: password, status: isVisible ? 'active' : 'background' }));
+        ws.send(JSON.stringify({
+          name: username,
+          password: password,
+          status: isVisible ? 'active' : 'background'
+        }));
 
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
@@ -682,6 +613,7 @@
           rejoin();
         }
       });
+
       ws.addEventListener("error", event => {
         if (!stopReconnect) {
           if (pingInterval) clearInterval(pingInterval);
@@ -715,7 +647,7 @@
           addChatMessage("System", `**${data.quit}** left the room.`, data.timestamp, null, false, true);
         }
       } else if (data.ready) {
-        addChatMessage("System", "Welcome to the application! Connection secured.", Date.now(), null, false, true);
+        addChatMessage("System", "Connection secured.", Date.now(), null, false, true);
         updateReadCursor();
       } else if (data.history) {
         msgContainer.innerHTML = "";
@@ -739,20 +671,24 @@
         let msgDiv = document.getElementById("msg_" + data.deleted);
         if (msgDiv) msgDiv.remove();
       } else {
-        // Normal chat message
         let msgIdInt = parseInt(data.id);
         if (msgIdInt > highestMessageId) highestMessageId = msgIdInt;
 
         if (data.timestamp >= clearedAt && data.timestamp > lastSeenTimestamp) {
           let wasAtBottom = isAtBottom;
+          let isFocused = document.visibilityState === 'visible';
+
           addChatMessage(data.name, data.message, data.timestamp, data.id, data.edited);
           lastSeenTimestamp = data.timestamp;
 
-          if (wasAtBottom && document.visibilityState === 'visible') {
+          if (wasAtBottom && isFocused) {
             chatlog.scrollBy(0, 1e8);
             updateReadCursor();
           } else {
             unreadAlert.style.display = "block";
+            if (document.hidden && Notification.permission === "granted" && data.name !== username) {
+              new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: "New message received" });
+            }
           }
         }
       }
@@ -808,7 +744,7 @@
           delBtn.style.textDecoration = "none";
           delBtn.onclick = () => {
             if (confirm("Delete this message?")) {
-              sendWsMessage({ delete: id });
+              if (currentWebSocket) currentWebSocket.send(JSON.stringify({ delete: id }));
             }
           };
 

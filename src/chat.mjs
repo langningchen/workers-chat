@@ -1,154 +1,5 @@
 import HTML from "./chat.html";
 
-const SW_CODE = `
-const wsMap = new Map();
-const queueMap = new Map();
-const pingMap = new Map();
-const visibilityMap = new Map();
-
-function getOrCreateWs(room, user, pass, host, proto, initialStatus) {
-    if (wsMap.has(room)) {
-        let ws = wsMap.get(room);
-        if (ws.readyState === 0 || ws.readyState === 1) return ws;
-    }
-
-    const wssUrl = proto + '//' + host + '/api/room/' + room + '/websocket';
-    const ws = new WebSocket(wssUrl);
-    wsMap.set(room, ws);
-    ws._stopReconnect = false;
-    
-    if (!queueMap.has(room)) queueMap.set(room, []);
-
-    ws.onopen = async () => {
-        ws.send(JSON.stringify({name: user, password: pass, status: initialStatus || 'background'}));
-        
-        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
-        clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'CONNECTED'}));
-        
-        if (pingMap.has(room)) clearInterval(pingMap.get(room));
-        pingMap.set(room, setInterval(() => {
-            if (ws.readyState === 1) ws.send("ping");
-        }, 2000));
-    };
-
-    ws.onmessage = async (event) => {
-        if (event.data === "pong") return;
-        const data = JSON.parse(event.data);
-
-        if (data.error) {
-            if (data.error.includes("password") || data.error.includes("nickname") || data.error.includes("Invalid")) {
-                ws._stopReconnect = true;
-            }
-        }
-        
-        if (data.ready) {
-            ws._isReady = true;
-            let queue = queueMap.get(room);
-            while(queue && queue.length > 0) {
-                ws.send(queue.shift());
-            }
-        }
-
-        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
-        clients.forEach(client => {
-            client.postMessage({type: 'WS_MSG', room: room, data: event.data});
-        });
-
-        let isVisible = visibilityMap.get(room) === true;
-        if (!isVisible && data.message && data.name && data.name !== user && !data.joined && !data.quit) {
-            const notifications = await self.registration.getNotifications({ tag: room });
-            let count = 1;
-            if (notifications.length > 0) {
-                const oldData = notifications[0].data;
-                count = (oldData && oldData.count ? oldData.count : 0) + 1;
-            }
-            
-            self.registration.showNotification('New Messages', {
-                body: \`You have \${count} unread messages in #\${room}\`,
-                icon: '/favicon.ico',
-                tag: room,
-                renotify: true,
-                data: { room, count }
-            });
-        }
-    };
-
-    ws.onclose = async () => {
-        ws._isReady = false;
-        if (pingMap.has(room)) {
-            clearInterval(pingMap.get(room));
-            pingMap.delete(room);
-        }
-        wsMap.delete(room);
-        
-        const clients = await self.clients.matchAll({includeUncontrolled: true, type: 'window'});
-        clients.forEach(c => c.postMessage({type: 'WS_STATUS', room: room, status: 'DISCONNECTED'}));
-
-        if (!ws._stopReconnect) {
-            setTimeout(() => {
-                getOrCreateWs(room, user, pass, host, proto, 'background');
-            }, 5000);
-        }
-    };
-
-    ws.onerror = (err) => {
-        ws._isReady = false;
-    };
-
-    return ws;
-}
-
-self.addEventListener('install', event => {
-    event.waitUntil(self.skipWaiting());
-});
-
-self.addEventListener('activate', event => {
-    event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('message', event => {
-    const d = event.data;
-    if (!d || !d.room) return;
-
-    if (d.type === 'VISIBILITY') {
-        visibilityMap.set(d.room, d.visible);
-        const ws = wsMap.get(d.room);
-        if (ws && ws.readyState === 1 && ws._isReady) {
-            ws.send(JSON.stringify({status: d.visible ? 'active' : 'background'}));
-        }
-    } else if (d.type === 'CONNECT') {
-        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto, d.status);
-        if (ws.readyState === 1 && ws._isReady && d.requestHistory) {
-            ws.send(JSON.stringify({requestHistory: true}));
-        }
-    } else if (d.type === 'WS_SEND') {
-        const ws = getOrCreateWs(d.room, d.user, d.pass, d.host, d.proto, 'active');
-        if (ws.readyState !== 1 || !ws._isReady) {
-            queueMap.get(d.room).push(d.data);
-        } else {
-            ws.send(d.data);
-        }
-    }
-});
-
-self.addEventListener('notificationclick', event => {
-    event.notification.close();
-    const d = event.notification.data;
-    if (!d || !d.room) return;
-
-    event.waitUntil(
-        self.clients.matchAll({type: 'window'}).then(clients => {
-            for (let client of clients) {
-                if (client.url.includes('#' + d.room) && 'focus' in client) {
-                    return client.focus();
-                }
-            }
-            if (self.clients.openWindow) return self.clients.openWindow('/#' + d.room);
-        })
-    );
-});
-`;
-
 async function handleErrors(request, func) {
   try {
     return await func();
@@ -176,9 +27,6 @@ export default {
       }
 
       switch (path[0]) {
-        case "sw.js":
-          return new Response(SW_CODE, { headers: { "Content-Type": "application/javascript;charset=UTF-8" } });
-
         case "api":
           return handleApiRequest(path.slice(1), request, env);
 
@@ -303,10 +151,12 @@ export class ChatRoom {
 
       msgs.sort((a, b) => a.timestamp - b.timestamp);
 
+      // Strict retention of only the latest 16 messages
       while (msgs.length > 16) {
         let removed = msgs.shift();
         this.storage.delete("msg_" + removed.id.padStart(10, "0"));
       }
+
       this.messages = msgs;
     });
 
@@ -538,6 +388,7 @@ export class ChatRoom {
 
         this.messages.push(msgObj);
 
+        // Strict retention of 16 messages
         while (this.messages.length > 16) {
           let removed = this.messages.shift();
           this.storage.delete("msg_" + removed.id.padStart(10, "0"));
