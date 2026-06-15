@@ -322,15 +322,12 @@
       let savedName = localStorage.getItem("chat_username");
       if (savedName) nameInput.value = savedName;
 
+      let focusPassword = false;
       if (document.location.hash.length > 1) {
         let hashRoom = document.location.hash.slice(1);
         roomNameInput.value = hashRoom;
         if (savedName) {
-          username = savedName;
-          roomname = hashRoom;
-          password = "";
-          startChat();
-          return;
+          focusPassword = true;
         }
       }
 
@@ -356,7 +353,12 @@
       roomNameInput.addEventListener("input", event => {
         if (event.currentTarget.value.length > 32) event.currentTarget.value = event.currentTarget.value.slice(0, 32);
       });
-      nameInput.focus();
+
+      if (focusPassword) {
+        passwordInput.focus();
+      } else {
+        nameInput.focus();
+      }
     }
 
     function updateReadCursor() {
@@ -687,7 +689,15 @@
           } else {
             unreadAlert.style.display = "block";
             if (document.hidden && Notification.permission === "granted" && data.name !== username) {
-              new Notification(data.name + " in #" + roomname, { icon: "/favicon.ico", body: "New message received" });
+              let unreadCount = highestMessageId - lastReadMessageId;
+              let bodyText = unreadCount > 0
+                ? `New message received (${unreadCount} unread)`
+                : "New message received";
+
+              new Notification(data.name + " in #" + roomname, {
+                icon: "/favicon.ico",
+                body: bodyText
+              });
             }
           }
         }
