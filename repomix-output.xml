@@ -1,3 +1,240 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.github/
+  workflows/
+    semgrep.yml
+src/
+  chat.html
+  chat.mjs
+.gitignore
+LICENSE
+package.json
+README.md
+wrangler.toml
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="LICENSE">
+Copyright (c) 2020, Cloudflare. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+</file>
+
+<file path="package.json">
+{
+  "name": "edge-chat-demo",
+  "description": "An edge chat service that runs on Cloudflare Workers using Durable Objects",
+  "version": "1.0.0",
+  "main": "./src/chat.mjs",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4.100.0"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy"
+  }
+}
+</file>
+
+<file path=".github/workflows/semgrep.yml">
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+  push: 
+    branches:
+      - main
+      - master
+  schedule:
+    - cron: '0 0 * * *'
+name: Semgrep config
+jobs:
+  semgrep:
+    name: semgrep/ci
+    runs-on: ubuntu-latest
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+      SEMGREP_URL: https://cloudflare.semgrep.dev
+      SEMGREP_APP_URL: https://cloudflare.semgrep.dev
+      SEMGREP_VERSION_CHECK_URL: https://cloudflare.semgrep.dev/api/check-version
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep ci
+</file>
+
+<file path=".gitignore">
+.wrangler/
+node_modules/
+</file>
+
+<file path="wrangler.toml">
+name = "chat"
+compatibility_date = "2024-01-01"
+
+main = "src/chat.mjs"
+
+[durable_objects]
+bindings = [
+  { name = "rooms", class_name = "ChatRoom" },
+]
+
+[[rules]]
+type = "Data"
+globs = ["**/*.html"]
+fallthrough = false
+
+# Indicate that you want the ChatRoom classes to be callable as Durable Objects.
+[[migrations]]
+tag = "v1"                                       # Should be unique for each entry
+new_sqlite_classes = ["ChatRoom"]
+
+[vars]
+GithubOwner = "langningchen"
+GithubRepo = "image-data"
+</file>
+
+<file path="README.md">
+# Cloudflare Edge Chat Demo
+
+This is a demo app written on [Cloudflare Workers](https://workers.cloudflare.com/) utilizing [Durable Objects](https://blog.cloudflare.com/introducing-workers-durable-objects) to implement real-time chat with stored history. This app runs 100% on Cloudflare's edge.
+
+Try it here: https://edge-chat-demo.cloudflareworkers.com
+
+The reason this demo is remarkable is because it deals with state. Before Durable Objects, Workers were stateless, and state had to be stored elsewhere. State can mean storage, but it also means the ability to coordinate. In a chat room, when one user sends a message, the app must somehow route that message to other users, via connections that those other users already had open. These connections are state, and coordinating them in a stateless framework is hard if not impossible.
+
+## How does it work?
+
+This chat app uses a Durable Object to control each chat room. Users connect to the object using WebSockets. Messages from one user are broadcast to all the other users. The chat history is also stored in durable storage, but this is only for history. Real-time messages are relayed directly from one user to others without going through the storage layer.
+
+Additionally, this demo uses Durable Objects for a second purpose: Applying a rate limit to messages from any particular IP. Each IP is assigned a Durable Object that tracks recent request frequency, so that users who send too many messages can be temporarily blocked -- even across multiple chat rooms. Interestingly, these objects don't actually store any durable state at all, because they only care about very recent history, and it's not a big deal if a rate limiter randomly resets on occasion. So, these rate limiter objects are an example of a pure coordination object with no storage.
+
+This chat app is only a few hundred lines of code. The deployment configuration is only a few lines. Yet, it will scale seamlessly to any number of chat rooms, limited only by Cloudflare's available resources. Of course, any individual chat room's scalability has a limit, since each object is single-threaded. But, that limit is far beyond what a human participant could keep up with anyway.
+
+For more details, take a look at the code! It is well-commented.
+
+## Updates
+
+This example was originally written using the [WebSocket API](https://developers.cloudflare.com/workers/runtime-apis/websockets/), but has since been [modified](https://github.com/cloudflare/workers-chat-demo/pull/32) to use the [WebSocket Hibernation API](https://developers.cloudflare.com/durable-objects/api/websockets/#websocket-hibernation), which is exclusive to Durable Objects.
+
+Prior to switching to the Hibernation API, WebSockets connected to a chatroom would keep the Durable Object pinned to memory even if they were just idling. This meant that a Durable Object with an open WebSocket connection would incur duration charges so long as the WebSocket connection stayed open. By switching to the WebSocket Hibernation API, the Workers Runtime will evict inactive Durable Object instances from memory, but still retain all WebSocket connections to the Durable Object. When the WebSockets become active again, the runtime will recreate the Durable Object and deliver events to the appropriate WebSocket event handler.
+
+Switching to the WebSocket Hibernation API reduces duration billing from the lifetime of the WebSocket connection to the amount of time when JavaScript is actively executing.
+
+## Learn More
+
+* [Durable Objects introductory blog post](https://blog.cloudflare.com/introducing-workers-durable-objects)
+* [Durable Objects documentation](https://developers.cloudflare.com/workers/learning/using-durable-objects)
+* [Durable Object WebSocket documentation](https://developers.cloudflare.com/durable-objects/reference/websockets/)
+
+## Deploy it yourself
+
+If you haven't already, enable Durable Objects by visiting the [Cloudflare dashboard](https://dash.cloudflare.com/) and navigating to "Workers" and then "Durable Objects".
+
+Then, make sure you have [Wrangler](https://developers.cloudflare.com/workers/cli-wrangler/install-update), the official Workers CLI, installed. Version 3.30.1 or newer is recommended for running this example.
+
+After installing it, run `wrangler login` to [connect it to your Cloudflare account](https://developers.cloudflare.com/workers/cli-wrangler/authentication).
+
+Once you've enabled Durable Objects on your account and have Wrangler installed and authenticated, you can deploy the app for the first time by running:
+
+    wrangler deploy
+
+If you get an error saying "Cannot create binding for class [...] because it is not currently configured to implement durable objects", you need to update your version of Wrangler.
+
+This command will deploy the app to your account under the name `edge-chat-demo`.
+
+## What are the dependencies?
+
+This demo code does not have any dependencies, aside from Cloudflare Workers (for the server side, `chat.mjs`) and a modern web browser (for the client side, `chat.html`). Deploying the code requires Wrangler.
+
+## How to uninstall
+
+Modify wrangler.toml to remove the durable_objects bindings and add a deleted_classes migration. The bottom of your wrangler.toml should look like:
+
+```
+[durable_objects]
+bindings = [
+]
+
+# Indicate that you want the ChatRoom and RateLimiter classes to be callable as Durable Objects.
+[[migrations]]
+tag = "v1" # Should be unique for each entry
+new_classes = ["ChatRoom", "RateLimiter"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["ChatRoom", "RateLimiter"]
+```
+
+Then run `wrangler deploy`, which will delete the Durable Objects and all data stored in them.  To remove the Worker, go to [dash.cloudflare.com](dash.cloudflare.com) and navigate to Workers -> Overview -> edge-chat-demo -> Manage Service -> Delete (bottom of page)
+</file>
+
+<file path="src/chat.html">
 <!DOCTYPE html>
 <html>
 
@@ -917,3 +1154,462 @@
 </body>
 
 </html>
+</file>
+
+<file path="src/chat.mjs">
+import HTML from "./chat.html";
+
+async function handleErrors(request, func) {
+  try {
+    return await func();
+  } catch (err) {
+    if (request.headers.get("Upgrade") == "websocket") {
+      let pair = new WebSocketPair();
+      pair[1].accept();
+      pair[1].send(JSON.stringify({ error: err.stack }));
+      pair[1].close(1011, "Uncaught exception during session setup");
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    } else {
+      return new Response(err.stack, { status: 500 });
+    }
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    return await handleErrors(request, async () => {
+      let url = new URL(request.url);
+      let path = url.pathname.slice(1).split('/');
+
+      if (!path[0]) {
+        return new Response(HTML, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+      }
+
+      switch (path[0]) {
+        case "api":
+          return handleApiRequest(path.slice(1), request, env);
+
+        case "upload": {
+          if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+          const Image = await request.text();
+          let array = new Uint8Array(32);
+          crypto.getRandomValues(array);
+          let ImageID = Array.from(array, byte => ('0' + byte.toString(16)).slice(-2)).join('').substring(0, 32);
+          const ImageData = Image.replace(/^data:image\/\w+;base64,/, '');
+          if (!ImageData || ImageData.length === 0) return new Response('Invalid image', { status: 400 });
+          try {
+            const response = await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg'), {
+              method: 'PUT',
+              headers: {
+                'Authorization': 'Bearer ' + env.GithubPAT,
+                'Content-Type': 'application/json',
+                'User-Agent': 'chat-image-uploader',
+              },
+              body: JSON.stringify({
+                message: `Upload from ${request.headers.get('CF-Connecting-IP')}`,
+                content: ImageData
+              })
+            });
+            if (!response.ok) return new Response('Upload failed', { status: 500 });
+            return new Response(ImageID, { headers: { 'Content-Type': 'text/plain' } });
+          } catch (e) {
+            return new Response('Upload failed', { status: 500 });
+          }
+        }
+
+        default:
+          if (request.method === 'GET' && path[0].length === 32) {
+            const ImageID = path[0];
+            const clientETag = request.headers.get('If-None-Match');
+            const imageETag = `"${ImageID}"`;
+            if (clientETag === imageETag) return new Response(null, { status: 304 });
+            return await fetch(new URL('https://api.github.com/repos/' + env.GithubOwner + '/' + env.GithubRepo + '/contents/' + ImageID + '.jpeg?1=1'), {
+              method: 'GET',
+              headers: {
+                'Authorization': 'Bearer ' + env.GithubPAT,
+                'Accept': 'application/vnd.github.v3.raw',
+                'User-Agent': 'chat-image-uploader',
+              },
+            }).then(async (res) => {
+              if (!res.ok) return new Response('Image not found', { status: 404 });
+              return new Response(await res.blob(), {
+                headers: {
+                  'Content-Type': 'image/jpeg',
+                  'Cache-Control': 'public, max-age=31536000, immutable',
+                  'ETag': imageETag
+                },
+              });
+            });
+          }
+          return new Response("Not found", { status: 404 });
+      }
+    });
+  }
+};
+
+async function handleApiRequest(path, request, env) {
+  switch (path[0]) {
+    case "room": {
+      if (!path[1]) {
+        if (request.method == "POST") {
+          let id = env.rooms.newUniqueId();
+          return new Response(id.toString(), { headers: { "Access-Control-Allow-Origin": "*" } });
+        } else {
+          return new Response("Method not allowed", { status: 405 });
+        }
+      }
+
+      let name = path[1];
+      let id;
+      if (name.match(/^[0-9a-f]{64}$/)) {
+        id = env.rooms.idFromString(name);
+      } else if (name.length <= 32) {
+        id = env.rooms.idFromName(name);
+      } else {
+        return new Response("Name too long", { status: 404 });
+      }
+
+      let roomObject = env.rooms.get(id);
+      let newUrl = new URL(request.url);
+      newUrl.pathname = "/" + path.slice(2).join("/");
+
+      return roomObject.fetch(newUrl, request);
+    }
+    default:
+      return new Response("Not found", { status: 404 });
+  }
+}
+
+export class ChatRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.storage = state.storage;
+    this.env = env;
+
+    this.sessions = new Map();
+    this.roomPassword = null;
+    this.messages = [];
+    this.messageCounter = 0;
+
+    this.state.blockConcurrencyWhile(async () => {
+      let storedPassword = await this.storage.get("roomPassword");
+      if (storedPassword !== undefined) {
+        this.roomPassword = storedPassword;
+      }
+
+      let history = await this.storage.list({ prefix: "msg_", limit: 1000, reverse: true });
+      let msgs = [];
+
+      for (let [key, value] of history) {
+        msgs.push(value);
+        let idNum = parseInt(key.split("_")[1]);
+        if (idNum > this.messageCounter) {
+          this.messageCounter = idNum;
+        }
+      }
+
+      msgs.sort((a, b) => a.timestamp - b.timestamp);
+
+      // Strict retention of only the latest 16 messages
+      while (msgs.length > 16) {
+        let removed = msgs.shift();
+        this.storage.delete("msg_" + removed.id.padStart(10, "0"));
+      }
+
+      this.messages = msgs;
+    });
+
+    this.state.getWebSockets().forEach((webSocket) => {
+      let meta = webSocket.deserializeAttachment();
+      let lastActive = Date.now();
+      this.sessions.set(webSocket, { ...meta, lastActive });
+      webSocket.serializeAttachment({ ...meta, lastActive });
+    });
+
+    this.lastTimestamp = 0;
+    this.pingInterval = null;
+    if (this.sessions.size > 0) {
+      this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
+    }
+  }
+
+  checkTimeout() {
+    if (this.sessions.size === 0) {
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+      return;
+    }
+    let now = Date.now();
+    this.sessions.forEach((session, ws) => {
+      if (now - session.lastActive > 10000) {
+        ws.close(1011, "Ping timeout");
+        this.closeOrErrorHandler(ws);
+      }
+    });
+  }
+
+  async fetch(request) {
+    return await handleErrors(request, async () => {
+      let url = new URL(request.url);
+
+      switch (url.pathname) {
+        case "/websocket": {
+          if (request.headers.get("Upgrade") != "websocket") {
+            return new Response("expected websocket", { status: 400 });
+          }
+
+          let ip = request.headers.get("CF-Connecting-IP");
+          let pair = new WebSocketPair();
+
+          await this.handleSession(pair[1], ip);
+
+          return new Response(null, { status: 101, webSocket: pair[0] });
+        }
+        default:
+          return new Response("Not found", { status: 404 });
+      }
+    });
+  }
+
+  async handleSession(webSocket, ip) {
+    this.state.acceptWebSocket(webSocket);
+
+    let session = { lastActive: Date.now(), status: 'active', readCursor: this.messageCounter };
+    webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive, readCursor: session.readCursor });
+    this.sessions.set(webSocket, session);
+
+    if (!this.pingInterval) {
+      this.pingInterval = setInterval(() => this.checkTimeout(), 2000);
+    }
+  }
+
+  broadcastRoster() {
+    let users = [];
+    this.sessions.forEach(s => {
+      if (s.name) {
+        let unread = this.messageCounter - (s.readCursor || this.messageCounter);
+        if (unread < 0) unread = 0;
+        users.push({ name: s.name, status: s.status || 'active', unread: unread });
+      }
+    });
+    this.broadcast({ roster: users });
+  }
+
+  async webSocketMessage(webSocket, msg) {
+    try {
+      let session = this.sessions.get(webSocket);
+      if (session.quit) {
+        webSocket.close(1011, "WebSocket broken.");
+        return;
+      }
+
+      session.lastActive = Date.now();
+      webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), lastActive: session.lastActive });
+
+      if (msg === "ping") {
+        webSocket.send("pong");
+        return;
+      }
+
+      let data = JSON.parse(msg);
+
+      if (data.readCursor !== undefined) {
+        session.readCursor = data.readCursor;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), readCursor: session.readCursor });
+        this.broadcastRoster();
+        return;
+      }
+
+      if (data.status && (!data.name && !data.message && !data.requestHistory)) {
+        if (session.status !== data.status) {
+          session.status = data.status;
+          webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), status: session.status });
+          this.broadcastRoster();
+        }
+        return;
+      }
+
+      if (!session.name) {
+        if (!data.name) {
+          webSocket.send(JSON.stringify({ error: "Name required." }));
+          webSocket.close(1008, "Name required.");
+          return;
+        }
+
+        if (!data.name.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
+          webSocket.send(JSON.stringify({ error: "Invalid nickname. Only letters, numbers, hyphens, and underscores are allowed." }));
+          webSocket.close(1008, "Invalid nickname.");
+          return;
+        }
+
+        let nameTaken = false;
+        this.sessions.forEach(s => {
+          if (s.name === data.name) nameTaken = true;
+        });
+
+        if (nameTaken) {
+          webSocket.send(JSON.stringify({ error: "Nickname already in use." }));
+          webSocket.close(1008, "Nickname already in use.");
+          return;
+        }
+
+        let providedPassword = data.password || "";
+
+        if (this.roomPassword !== null && this.roomPassword !== providedPassword) {
+          webSocket.send(JSON.stringify({ error: "Incorrect password." }));
+          webSocket.close(1008, "Incorrect password.");
+          return;
+        } else if (this.roomPassword === null && providedPassword !== "") {
+          this.roomPassword = providedPassword;
+          this.storage.put("roomPassword", this.roomPassword);
+        }
+
+        session.name = "" + data.name;
+        session.status = data.status || 'active';
+        session.readCursor = this.messageCounter;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name, status: session.status, readCursor: session.readCursor });
+
+        this.broadcastRoster();
+        webSocket.send(JSON.stringify({ history: this.messages }));
+        this.broadcast({ joined: session.name, status: session.status, timestamp: Date.now() });
+        webSocket.send(JSON.stringify({ ready: true }));
+        return;
+      }
+
+      if (data.requestHistory) {
+        webSocket.send(JSON.stringify({ history: this.messages }));
+        return;
+      }
+
+      if (data.message !== undefined && data.message.startsWith("/nick ")) {
+        let newName = data.message.substring(6).trim();
+        if (newName.length > 0 && newName.length <= 32) {
+          if (!newName.match(/^[A-Za-z0-9\-_]{1,32}$/)) {
+            webSocket.send(JSON.stringify({ error: "Invalid nickname." }));
+            return;
+          }
+
+          let nameTaken = false;
+          this.sessions.forEach(s => {
+            if (s.name === newName) nameTaken = true;
+          });
+
+          if (nameTaken) {
+            webSocket.send(JSON.stringify({ error: "Nickname already in use." }));
+            return;
+          }
+
+          let oldName = session.name;
+          session.name = newName;
+          webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), name: session.name });
+          this.broadcast({ nameChange: { old: oldName, new: newName }, timestamp: Date.now() });
+          this.broadcastRoster();
+        }
+        return;
+      }
+
+      if (data.edit) {
+        let msgId = data.edit;
+        let newText = data.text;
+
+        let targetMsg = this.messages.find(m => m.id === msgId);
+        if (targetMsg && targetMsg.name === session.name) {
+          targetMsg.message = "" + newText;
+          targetMsg.edited = true;
+          this.storage.put("msg_" + msgId.padStart(10, "0"), targetMsg);
+          this.broadcast({ edited: msgId, text: newText });
+        }
+        return;
+      }
+
+      if (data.delete) {
+        let msgId = data.delete;
+
+        let targetIndex = this.messages.findIndex(m => m.id === msgId);
+        if (targetIndex !== -1 && this.messages[targetIndex].name === session.name) {
+          this.messages.splice(targetIndex, 1);
+          this.storage.delete("msg_" + msgId.padStart(10, "0"));
+          this.broadcast({ deleted: msgId });
+        }
+        return;
+      }
+
+      if (data.message) {
+        let msgObj = { name: session.name, message: "" + data.message };
+
+        msgObj.timestamp = Math.max(Date.now(), this.lastTimestamp + 1);
+        this.lastTimestamp = msgObj.timestamp;
+
+        this.messageCounter++;
+        msgObj.id = this.messageCounter.toString();
+
+        this.messages.push(msgObj);
+
+        // Strict retention of 16 messages
+        while (this.messages.length > 16) {
+          let removed = this.messages.shift();
+          this.storage.delete("msg_" + removed.id.padStart(10, "0"));
+        }
+
+        this.storage.put("msg_" + msgObj.id.padStart(10, "0"), msgObj);
+
+        session.readCursor = this.messageCounter;
+        webSocket.serializeAttachment({ ...webSocket.deserializeAttachment(), readCursor: session.readCursor });
+
+        this.broadcast(msgObj);
+        this.broadcastRoster();
+      }
+    } catch (err) {
+      webSocket.send(JSON.stringify({ error: err.stack }));
+    }
+  }
+
+  async closeOrErrorHandler(webSocket) {
+    let session = this.sessions.get(webSocket) || {};
+    session.quit = true;
+    this.sessions.delete(webSocket);
+    if (session.name) {
+      this.broadcast({ quit: session.name, timestamp: Date.now() });
+      this.broadcastRoster();
+    }
+  }
+
+  async webSocketClose(webSocket, code, reason, wasClean) {
+    this.closeOrErrorHandler(webSocket);
+  }
+
+  async webSocketError(webSocket, error) {
+    this.closeOrErrorHandler(webSocket);
+  }
+
+  broadcast(message) {
+    if (typeof message !== "string") {
+      message = JSON.stringify(message);
+    }
+
+    let quitters = [];
+    this.sessions.forEach((session, webSocket) => {
+      if (session.name) {
+        try {
+          webSocket.send(message);
+        } catch (err) {
+          session.quit = true;
+          quitters.push(session);
+          this.sessions.delete(webSocket);
+        }
+      }
+    });
+
+    quitters.forEach(quitter => {
+      if (quitter.name) {
+        this.broadcast({ quit: quitter.name, timestamp: Date.now() });
+        this.broadcastRoster();
+      }
+    });
+  }
+}
+</file>
+
+</files>

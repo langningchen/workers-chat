@@ -1,7 +1,7 @@
 name = "chat"
 compatibility_date = "2024-01-01"
 
-main = "src/chat.mjs"
+main = "src/index.mjs"
 
 [durable_objects]
 bindings = [
@@ -9,13 +9,12 @@ bindings = [
 ]
 
 [[rules]]
-type = "Data"
-globs = ["**/*.html"]
+type = "Text"
+globs = ["**/*.html", "**/*.css", "**/*.client.js"]
 fallthrough = false
 
-# Indicate that you want the ChatRoom classes to be callable as Durable Objects.
 [[migrations]]
-tag = "v1"                                       # Should be unique for each entry
+tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
 [vars]

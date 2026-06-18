@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.3/purify.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/mhchem.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-katex-extension/lib/index.umd.js"></script>
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-highlight@2.1.0/lib/index.umd.js"></script>
+
+    <link rel="stylesheet" href="/style.css">
+</head>
+</head>
+
+<body>
+    <div id="connection-status"></div>
+    <div id="auth-form-container" class="center-form-container">
+        <h2>Join Chat</h2>
+        <form id="auth-form" style="display:flex; flex-direction:column; align-items:center;">
+            <input id="name-input" placeholder="Nickname" required pattern="[A-Za-z0-9\-_]+"
+                title="Only letters, numbers, hyphens, and underscores allowed." autocomplete="username">
+            <input id="room-name" placeholder="Room Name" required>
+            <input id="password-input" type="password" placeholder="Room Password (Optional)"
+                autocomplete="current-password">
+            <button type="submit">Connect</button>
+        </form>
+    </div>
+
+    <form id="chatroom" action="/fake-form-action" style="display:none;">
+        <div id="chatlog">
+            <div id="messages-container"></div>
+            <div id="live-preview" class="msg-item">
+                <span class="username">Preview: </span>
+                <div class="content" style="display:inline;"></div>
+            </div>
+            <div id="spacer" style="height: 10px;"></div>
+        </div>
+
+        <div id="unread-alert">↓ New messages</div>
+
+        <div id="roster">
+            <div id="roster-users"></div>
+        </div>
+
+        <div id="typing-indicator"></div>
+        <div id="editing-indicator">Editing message (Press Esc to cancel)</div>
+
+        <div id="chat-input-container">
+            <textarea id="chat-input" placeholder="Type a message or /help (Shift+Enter for new line)"></textarea>
+        </div>
+    </form>
+
+    <script src="/app.client.js"></script>
+</body>
+
+</html>
